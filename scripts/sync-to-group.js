@@ -182,6 +182,38 @@ function mirrorJson(source, targetLibraryID) {
 }
 
 
+async function mirrorNotes(source, target, context) {
+    const keep = new Set();
+    for (const noteID of source.getNotes()) {
+        const sourceNote = await Zotero.Items.getAsync(noteID);
+        if (!sourceNote || sourceNote.deleted) {
+            continue;
+        }
+
+        let targetNote = await sourceNote.getLinkedItem(context.libraryID, true);
+        if (!targetNote || targetNote.deleted) {
+            targetNote = sourceNote.clone(context.libraryID, {
+                skipTags: true,
+                includeCollections: false,
+            });
+        }
+        targetNote.parentID = target.id;
+        targetNote.setNote(sourceNote.getNote());
+        targetNote.setTags(sourceNote.getTags());
+        await Zotero.DB.executeTransaction(async () => {
+            await targetNote.save();
+            await sourceNote.addLinkedItem(targetNote);
+        });
+        keep.add(targetNote.id);
+    }
+
+    const stale = target.getNotes().filter(id => !keep.has(id));
+    if (stale.length) {
+        await Zotero.Items.erase(stale);
+    }
+}
+
+
 async function mirrorItem(source, context) {
     updateProgress(context, "条目", source, titleOf(source));
     if (source.libraryID !== Zotero.Libraries.userLibraryID) {
@@ -212,6 +244,7 @@ async function mirrorItem(source, context) {
         await target.save();
         await source.addLinkedItem(target);
     });
+    await mirrorNotes(source, target, context);
     context.targetIndex.set(key, target);
     if (created) {
         context.summary.created++;

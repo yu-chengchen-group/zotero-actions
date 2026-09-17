@@ -77,7 +77,7 @@ PUT https://api.chen-group.cn/v1/attachments?doi=...&kind=pdf|bundle
 - 新条目跨库复制并建立 linked-item 关系；保存前保留源 citationkey。
 - Collection 使用 linked-collection 关系保持重命名和移动后的对应关系。
 - 选条目时严格镜像该条目的元数据与 Tags；选 Collection 时严格镜像其子树、条目、Tags 和 membership。
-- Note、PDF、Markdown、FIG 均不进入 Group Library。
+- child Note 严格镜像到 Group Library；PDF、Markdown、FIG 不进入 Group Library。
 - Better BibTeX `keyScope` 必须为 `library`。
 
 ## document2md 与 UI
