@@ -147,10 +147,10 @@ function updateProgress(context, type, source, label) {
 async function buildTargetIndex(libraryID) {
     const index = new Map();
     const duplicates = new Set();
-    for (const item of await Zotero.Items.getAll(libraryID, false, false, false)) {
-        if (!item || !item.isRegularItem() || item.deleted) {
-            continue;
-        }
+    const items = (await Zotero.Items.getAll(libraryID, false, false, false))
+        .filter(item => item && item.isRegularItem() && !item.deleted);
+    await Zotero.Items.loadDataTypes(items);
+    for (const item of items) {
         const key = citationKey(item);
         if (!key) {
             continue;
@@ -182,16 +182,60 @@ function mirrorJson(source, targetLibraryID) {
 }
 
 
+function managedNoteKind(noteHtml) {
+    if (typeof noteHtml !== "string") {
+        return null;
+    }
+    if (noteHtml.startsWith("<p><strong>Classification Record</strong></p><pre>")) {
+        return "Classification Record";
+    }
+    const citations = /^<h1>(Citations\d*)<\/h1>\s*<p>Do not edit this note manually!<\/p>\s*<pre>/.exec(noteHtml);
+    return citations ? citations[1] : null;
+}
+
+
+function latestNote(notes) {
+    return notes.reduce((latest, note) => (
+        !latest || note.version > latest.version
+        || (note.version === latest.version && note.key > latest.key)
+            ? note : latest
+    ), null);
+}
+
+
 async function mirrorNotes(source, target, context) {
-    const keep = new Set();
+    const sourceByKind = new Map();
     for (const noteID of source.getNotes()) {
-        const sourceNote = await Zotero.Items.getAsync(noteID);
-        if (!sourceNote || sourceNote.deleted) {
+        const note = await Zotero.Items.getAsync(noteID);
+        if (!note || note.deleted) {
             continue;
         }
+        const kind = managedNoteKind(note.getNote());
+        if (kind) {
+            const selected = sourceByKind.get(kind);
+            sourceByKind.set(kind, latestNote(selected ? [selected, note] : [note]));
+        }
+    }
 
+    const targetNotes = [];
+    for (const noteID of target.getNotes()) {
+        const note = await Zotero.Items.getAsync(noteID);
+        if (note && !note.deleted && managedNoteKind(note.getNote())) {
+            targetNotes.push(note);
+        }
+    }
+    const keep = new Set();
+    for (const [kind, sourceNote] of sourceByKind) {
         let targetNote = await sourceNote.getLinkedItem(context.libraryID, true);
+        if (targetNote && !targetNote.deleted && (
+            targetNote.parentID !== target.id || managedNoteKind(targetNote.getNote()) !== kind
+        )) {
+            throw new Error(`受管理 Note 关联异常：${kind}`);
+        }
         if (!targetNote || targetNote.deleted) {
+            targetNote = latestNote(targetNotes.filter(note => managedNoteKind(note.getNote()) === kind));
+        }
+        if (!targetNote) {
             targetNote = sourceNote.clone(context.libraryID, {
                 skipTags: true,
                 includeCollections: false,
@@ -207,7 +251,7 @@ async function mirrorNotes(source, target, context) {
         keep.add(targetNote.id);
     }
 
-    const stale = target.getNotes().filter(id => !keep.has(id));
+    const stale = targetNotes.filter(note => !keep.has(note.id)).map(note => note.id);
     if (stale.length) {
         await Zotero.Items.erase(stale);
     }
@@ -219,6 +263,7 @@ async function mirrorItem(source, context) {
     if (source.libraryID !== Zotero.Libraries.userLibraryID) {
         throw new Error("同步到课题组只允许在“我的文库”中执行");
     }
+    await Zotero.Items.loadDataTypes([source]);
     const key = citationKey(source);
     if (!key) {
         throw new Error(`缺少 citationkey：${titleOf(source)}`);
@@ -330,7 +375,11 @@ async function syncCollection(source, targetParent, context, mirrorItems = true)
     const target = await ensureTargetCollection(source, targetParent, context);
     const sourceItems = source.getChildItems(false, false)
         .filter(value => value && value.isRegularItem() && !value.deleted);
+    const currentItemIDs = target.getChildItems(false, false)
+        .filter(value => value && value.isRegularItem() && !value.deleted)
+        .map(value => value.id);
     const targetItemIDs = new Set();
+    let itemSyncFailed = false;
 
     for (const sourceItem of sourceItems) {
         try {
@@ -339,6 +388,7 @@ async function syncCollection(source, targetParent, context, mirrorItems = true)
                 targetItemIDs.add(targetItem.id);
             }
             else {
+                await Zotero.Items.loadDataTypes([sourceItem]);
                 const key = citationKey(sourceItem);
                 const targetItem = key ? context.targetIndex.get(key) : null;
                 if (targetItem) {
@@ -347,16 +397,16 @@ async function syncCollection(source, targetParent, context, mirrorItems = true)
             }
         }
         catch (error) {
+            itemSyncFailed = true;
             context.summary.failed.push({ item: sourceItem, error: error.message || String(error) });
             Zotero.logError(error);
         }
     }
 
-    const currentItemIDs = target.getChildItems(false, false)
-        .filter(value => value && value.isRegularItem() && !value.deleted)
-        .map(value => value.id);
     const addIDs = [...targetItemIDs].filter(id => !currentItemIDs.includes(id));
-    const removeIDs = currentItemIDs.filter(id => !targetItemIDs.has(id));
+    const removeIDs = itemSyncFailed
+        ? []
+        : currentItemIDs.filter(id => !targetItemIDs.has(id));
     if (addIDs.length || removeIDs.length) {
         await Zotero.DB.executeTransaction(async () => {
             if (addIDs.length) {
@@ -396,6 +446,7 @@ async function syncWholeLibrary(context) {
         false
     )).filter(value => value && value.isRegularItem() && !value.deleted);
     const sourceKeys = new Set();
+    await Zotero.Items.loadDataTypes(sourceItems);
     for (const sourceItem of sourceItems) {
         try {
             const key = citationKey(sourceItem);

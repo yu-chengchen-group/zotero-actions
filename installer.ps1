@@ -296,24 +296,12 @@ foreach ($definition in $actions) {
 }
 
 [Environment]::SetEnvironmentVariable(
-    "DOCUMENT2MD_PROFILE",
-    "server",
-    [EnvironmentVariableTarget]::User
-)
-[Environment]::SetEnvironmentVariable(
     "CHEN_GROUP_API_KEY_MEMBER",
     $apiKey,
     [EnvironmentVariableTarget]::User
 )
-$env:DOCUMENT2MD_PROFILE = "server"
 $env:CHEN_GROUP_API_KEY_MEMBER = $apiKey
 
-if ([Environment]::GetEnvironmentVariable(
-    "DOCUMENT2MD_PROFILE",
-    [EnvironmentVariableTarget]::User
-) -ne "server") {
-    Fail (Zh "5a6J6KOF5qCh6aqM5aSx6LSl77yaRE9DVU1FTlQyTURfUFJPRklMRSDmnKrorr7nva7kuLogc2VydmVy44CC")
-}
 if ([Environment]::GetEnvironmentVariable(
     "CHEN_GROUP_API_KEY_MEMBER",
     [EnvironmentVariableTarget]::User

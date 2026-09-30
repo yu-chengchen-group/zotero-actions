@@ -1,8 +1,9 @@
 // 菜单名称：转为MD
 const API_URL = "https://api.chen-group.cn/v1/document2md";
-const API_KEY = Services.env.get("CHEN_GROUP_API_KEY")
-    || Services.env.get("CHEN_GROUP_API_KEY_MEMBER");
-const API_PROFILE = Services.env.get("DOCUMENT2MD_PROFILE");
+const TEACHER_KEY = Services.env.get("CHEN_GROUP_API_KEY");
+const MEMBER_KEY = Services.env.get("CHEN_GROUP_API_KEY_MEMBER");
+const API_KEY = TEACHER_KEY || MEMBER_KEY;
+const API_PROFILE = TEACHER_KEY ? "local" : "server";
 const SERVER_POLL_INTERVAL_MS = 5000;
 
 const STATUS_PROCESSING = "@md-处理中";
@@ -677,7 +678,7 @@ async function processScope(scope) {
         };
     }
 
-    if (allSourcesHaveMarkdown(literature)) {
+    if (allSources && allSourcesHaveMarkdown(literature)) {
         await setStatus(literature, STATUS_SUCCESS);
         return { status: "skipped" };
     }
@@ -756,7 +757,7 @@ await (async () => {
     }
     assertPersonalLibrary();
     if (!ACTIVE_API) {
-        throw new Error("环境变量 DOCUMENT2MD_PROFILE 必须为 local 或 server");
+        throw new Error("无法确定 document2md 调用模式");
     }
     if (ACTIVE_API.requiresKey && !API_KEY) {
         throw new Error("缺少环境变量 CHEN_GROUP_API_KEY 或 CHEN_GROUP_API_KEY_MEMBER");
