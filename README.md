@@ -1,46 +1,90 @@
 # Zotero Actions
 
-课题组 Zotero 附件同步脚本。学生日常只需要使用 **同步附件**。
+课题组 Zotero 附件同步工具。学生日常使用“同步附件”。
 
-## 安装
+## 首次安装
 
-1. 安装 [Zotero 10](https://www.zotero.org/download/)。
-2. 安装 [Zotero Actions & Tags](https://github.com/windingwind/zotero-actions-tags/releases)。
-3. 下载并解压 [zotero-actions-student.zip](https://github.com/yu-chengchen-group/zotero-actions/releases/latest/download/zotero-actions-student.zip)。
-4. 双击 `install.cmd`。
-5. 按提示输入课题组 API Key。
+准备：
 
-安装完成后，在“我的文库”中右键文献或 Collection，即可看到 **同步附件**。
+1. [Zotero](https://www.zotero.org/download/)
+2. [Zotero Actions & Tags](https://github.com/windingwind/zotero-actions-tags/releases)
 
-## 同步附件在做什么？
+下载并解压：
 
-学生使用 `CHEN_GROUP_API_KEY_MEMBER`，附件只从服务器流向本地。
+[zotero-actions-student.zip](https://github.com/yu-chengchen-group/zotero-actions/releases/latest/download/zotero-actions-student.zip)
 
-- 如果教师已经发布过这篇文献，会直接复用服务器 PDF、Markdown 和相关图片。
-- 如果教师后来发布了新版 PDF，学生再次执行“同步附件”时会按 PDF SHA-256 自动刷新本地 PDF 和 Markdown bundle。
-- 服务器缺 PDF 时，会自动尝试查找全文；找到后下载到本地。
-- 服务器没有 Markdown 时，会调用公网 document2md 生成本地 Markdown，但不会上传或覆盖课题组缓存。
-- 自动检索失败时，会提示需要人工下载 PDF。
-- 普通成员没有附件缓存写权限。
+双击：
 
-## 群组库怎么用？
+```text
+install.cmd
+```
 
-课题组群组库只同步文献的元数据、标签和分类，不同步 PDF、Markdown 和图片。
+按提示输入课题组成员 API Key。
 
-需要全文时：
+安装完成后双击：
 
-1. 将需要的文献从群组库加入“我的文库”。
-2. 在“我的文库”中选中文献或 Collection。
-3. 右键 → **同步附件**。
+```text
+doctor.cmd
+```
 
-“同步附件”只在“我的文库”中运行。
+验证通过后，在 Zotero“我的文库”中右键文献或 Collection，即可使用“同步附件”。
+
+## 日常使用
+
+“同步附件”负责：
+
+- 从课题组附件服务获取已有 PDF、Markdown 和图片
+- 根据 PDF SHA-256 同步服务器新版附件
+- 为可获取全文的文献取得 PDF
+- 为本地 PDF 生成或更新 Markdown
+- 在需要人工获取 PDF 时显示提示
+
+课题组群组库共享文献元数据、标签和分类；附件在个人库中使用。
+
+使用步骤：
+
+1. 将需要的文献加入“我的文库”。
+2. 选中文献或 Collection。
+3. 右键选择“同步附件”。
 
 ## 更新
 
-下载并解压新版 `zotero-actions-student.zip`，双击 `update.cmd`。旧版压缩包没有 `update.cmd` 时，重新运行 `install.cmd`，效果相同。
+下载并解压最新的 `zotero-actions-student.zip`。
 
-## 检查与卸载
+双击：
 
-- `doctor.cmd`：检查 Actions & Tags、课题组 Action 和成员 API Key 是否可用。
-- `uninstall.cmd`：移除课题组 Action 和成员 API Key；不会卸载 Zotero 或 Actions & Tags。
+```text
+update.cmd
+```
 
+随后运行：
+
+```text
+doctor.cmd
+```
+
+验证通过后即可继续使用。
+
+## 同步模型
+
+学生使用 `CHEN_GROUP_API_KEY_MEMBER` 访问课题组附件服务。
+
+附件同步方向：
+
+```text
+课题组附件服务
+        ↓
+   学生个人库
+```
+
+本地 Markdown 由 document2md 按当前 PDF 内容生成。
+
+## 卸载
+
+关闭 Zotero，然后双击：
+
+```text
+uninstall.cmd
+```
+
+该操作移除课题组 Action 和成员 API Key。Zotero 与 Actions & Tags 保持原安装状态。
