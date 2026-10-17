@@ -109,5 +109,5 @@ PUT https://api.chen-group.cn/v1/attachments?doi=...&kind=pdf|bundle
 才提示输入，并验证新 Key 后写入。安装器只维护成员 Key；document2md 后端由脚本根据 Key 自动确定。
 重复运行只更新原 Action，不会创建重复项。
 
-Release 中的 `zotero-actions-student.zip` 只包含 README、安装器、`sync-attachments.js` 和 `document2md.js`。
+Release 中的 `zotero-actions-student.zip` 由 `package-student.ps1` 生成，只包含 README、`install.cmd`、`update.cmd`、`doctor.cmd`、`uninstall.cmd`、`installer.ps1`、`maintenance.ps1`、`sync-attachments.js` 和 `document2md.js`。不要手工维护另一份打包清单。
 

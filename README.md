@@ -6,7 +6,7 @@
 
 1. 安装 [Zotero 10](https://www.zotero.org/download/)。
 2. 安装 [Zotero Actions & Tags](https://github.com/windingwind/zotero-actions-tags/releases)。
-3. 下载并解压 [zotero-actions-student.zip](https://github.com/ycchen-FZU/zotero-actions/releases/latest/download/zotero-actions-student.zip)。
+3. 下载并解压 [zotero-actions-student.zip](https://github.com/yu-chengchen-group/zotero-actions/releases/latest/download/zotero-actions-student.zip)。
 4. 双击 `install.cmd`。
 5. 按提示输入课题组 API Key。
 
@@ -37,5 +37,10 @@
 
 ## 更新
 
-下载新版 `zotero-actions-student.zip` 后，重新运行 `install.cmd` 即可。
+下载并解压新版 `zotero-actions-student.zip`，双击 `update.cmd`。旧版压缩包没有 `update.cmd` 时，重新运行 `install.cmd`，效果相同。
+
+## 检查与卸载
+
+- `doctor.cmd`：检查 Actions & Tags、课题组 Action 和成员 API Key 是否可用。
+- `uninstall.cmd`：移除课题组 Action 和成员 API Key；不会卸载 Zotero 或 Actions & Tags。
 
