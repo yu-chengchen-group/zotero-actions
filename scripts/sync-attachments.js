@@ -16,6 +16,7 @@ const HTTP_RETRY_LIMIT = 10;
 const CACHE_KEY_PREFIX = "chen:";
 const CACHE_KEY_PATTERN = /^chen:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SOURCE_PDF_SHA256_PATTERN = /^<!-- document2md-source-pdf-sha256: ([0-9a-f]{64}) -->$/;
+const SOURCE_DOCX_SHA256_PATTERN = /^<!-- document2md-source-docx-sha256: ([0-9a-f]{64}) -->$/;
 
 
 function getInvocationItems() {
@@ -201,6 +202,26 @@ async function localPdf(literature) {
 }
 
 
+async function localDocx(literature) {
+    let found = null;
+    for (const attachmentID of literature.getAttachments()) {
+        const attachment = await Zotero.Items.getAsync(attachmentID);
+        if (!attachment || !attachment.isAttachment()
+            || !/\.docx$/i.test(attachmentName(attachment))) {
+            continue;
+        }
+        const path = await attachment.getFilePathAsync();
+        if (path && await IOUtils.exists(path)) {
+            if (found) {
+                throw new Error("存在多个 DOCX 附件，无法确定单一发布来源");
+            }
+            found = attachment;
+        }
+    }
+    return found;
+}
+
+
 async function localMarkdown(literature, pdfAttachment = null) {
     const expected = pdfAttachment
         ? `${attachmentName(pdfAttachment)}.md`.toLowerCase()
@@ -230,6 +251,15 @@ async function localMarkdown(literature, pdfAttachment = null) {
         }
     }
     return fallback;
+}
+
+
+async function localDocxMarkdown(literature, docx) {
+    const markdown = await localMarkdown(literature, docx);
+    return markdown
+        && attachmentName(markdown).toLowerCase()
+            === `${attachmentName(docx)}.md`.toLowerCase()
+        ? markdown : null;
 }
 
 
@@ -411,6 +441,26 @@ async function markdownMatchesPdf(markdown, pdf) {
         return false;
     }
     return recorded === sha256File(path);
+}
+
+
+async function markdownMatchesDocx(markdown, docx) {
+    if (!markdown || !docx
+        || attachmentName(markdown).toLowerCase()
+            !== `${attachmentName(docx)}.md`.toLowerCase()) {
+        return false;
+    }
+    const mdPath = await markdown.getFilePathAsync();
+    const sourcePath = await docx.getFilePathAsync();
+    if (!mdPath || !sourcePath
+        || !await IOUtils.exists(mdPath)
+        || !await IOUtils.exists(sourcePath)) {
+        return false;
+    }
+    const content = await Zotero.File.getContentsAsync(mdPath, "utf-8");
+    const firstLine = String(content || "").split(/\r?\n/, 1)[0];
+    const match = firstLine.match(SOURCE_DOCX_SHA256_PATTERN);
+    return !!match && match[1] === sha256File(sourcePath);
 }
 
 
@@ -788,11 +838,43 @@ let activeBatch = null;
         return current;
     }
 
-    async function refreshMarkdown(literatureItem, pdf, existingMarkdown) {
-        await runDocument2mdSerial(pdf);
-        const markdown = await localMarkdown(literatureItem, pdf);
+    async function refreshMarkdown(literatureItem, source, existingMarkdown) {
+        const isDocx = /\.docx$/i.test(attachmentName(source));
+        const sourcePath = isDocx ? await source.getFilePathAsync() : null;
+        const sourceHash = isDocx && sourcePath ? sha256File(sourcePath) : "";
+        await runDocument2mdSerial(source);
+        const markdown = isDocx
+            ? await localDocxMarkdown(literatureItem, source)
+            : await localMarkdown(literatureItem, source);
         if (!markdown) {
             throw new Error("document2md 未生成 Markdown");
+        }
+        if (isDocx) {
+            if (!sourceHash || sourceHash !== sha256File(sourcePath)
+                || !literatureItem.getTags().some(tag => tag.tag === "@md-已生成")) {
+                throw new Error("DOCX 转换失败或转换期间原文件发生变化");
+            }
+            const path = await markdown.getFilePathAsync();
+            if (!path || !await IOUtils.exists(path)) {
+                throw new Error("DOCX 转换后 Markdown 文件不存在");
+            }
+            const content = await Zotero.File.getContentsAsync(path, "utf-8");
+            const normalized = String(content || "").replace(
+                /^<!-- document2md-source-docx-sha256: [0-9a-f]{64} -->\r?\n(?:\r?\n)?/,
+                ""
+            );
+            if (!normalized.trim()) {
+                throw new Error("DOCX 转换结果为空");
+            }
+            await Zotero.File.putContentsAsync(
+                path,
+                `<!-- document2md-source-docx-sha256: ${sourceHash} -->\n\n${normalized}`,
+                "utf-8"
+            );
+            if (Zotero.FullText) {
+                await Zotero.FullText.queueItem(markdown);
+            }
+            await Zotero.Sync.Storage.Local.updateSyncStates([markdown], "to_upload");
         }
         if (existingMarkdown && existingMarkdown.id !== markdown.id) {
             await Zotero.Items.erase([existingMarkdown.id]);
@@ -869,16 +951,66 @@ let activeBatch = null;
                 if (state.error) {
                     throw state.error;
                 }
-                let { pdf, markdown } = state;
-                if (!pdf || !state.localPdfSha256) {
-                    throw new Error("教师发布要求本地存在 PDF");
+                let {
+                    literatureItem,
+                    identity,
+                    key,
+                    pdf,
+                    markdown,
+                    localPdfSha256,
+                    remote,
+                } = state;
+                let changed = false;
+
+                if (!pdf || !localPdfSha256) {
+                    const docx = await localDocx(literatureItem);
+                    if (docx && remote.pdf.status !== "cached") {
+                        let md = await localDocxMarkdown(literatureItem, docx);
+                        const needsConversion = !await markdownMatchesDocx(md, docx);
+                        if (needsConversion) {
+                            updateBatchProgress(
+                                batch, processed, literature.length, "处理中 · Markdown 转换"
+                            );
+                            md = await refreshMarkdown(literatureItem, docx, md);
+                        }
+                        if (needsConversion || remote.bundle.status !== "cached") {
+                            await publishAttachments(identity, null, md, false);
+                            addResult(true);
+                        }
+                        else {
+                            addResult(false);
+                        }
+                        continue;
+                    }
+                    if (remote.pdf.status !== "cached" && identity.searchable) {
+                        remote = await getRemoteState(identity);
+                    }
+                    if (remote.pdf.status === "cached") {
+                        pdf = await downloadPdf(literatureItem, key, remote.pdf.url);
+                        const pdfPath = await pdf.getFilePathAsync();
+                        if (!pdfPath || !await IOUtils.exists(pdfPath)) {
+                            throw new Error("自动获取 PDF 后本地文件不存在");
+                        }
+                        localPdfSha256 = sha256File(pdfPath);
+                        markdown = await localMarkdown(literatureItem, pdf);
+                        changed = true;
+                    }
+                    else if (remote.pdf.status === "manual" && remote.pdf.url) {
+                        summary.manual.push({ ...state.entry, url: remote.pdf.url });
+                        continue;
+                    }
+                    else {
+                        summary.notFound.push(state.entry);
+                        continue;
+                    }
                 }
-                const remoteHash = remotePdfSha256(state.remote);
+
+                const remoteHash = remotePdfSha256(remote);
                 const pdfMatches = (
-                    state.remote.pdf.status === "cached"
-                    && remoteHash === state.localPdfSha256
+                    remote.pdf.status === "cached"
+                    && remoteHash === localPdfSha256
                 );
-                const bundleCached = state.remote.bundle.status === "cached";
+                const bundleCached = remote.bundle.status === "cached";
 
                 if (!markdown || !await markdownMatchesPdf(markdown, pdf)) {
                     updateBatchProgress(
@@ -891,7 +1023,7 @@ let activeBatch = null;
                 }
 
                 if (pdfMatches && bundleCached) {
-                    addResult(false);
+                    addResult(changed);
                 }
                 else {
                     await publishAttachments(state.identity, pdf, markdown, !pdfMatches);
@@ -927,6 +1059,32 @@ let activeBatch = null;
             let changed = false;
 
             if (!pdf) {
+                const docx = await localDocx(literatureItem);
+                if (remote.pdf.status !== "cached" && docx) {
+                    let md = await localDocxMarkdown(literatureItem, docx);
+                    if (await markdownMatchesDocx(md, docx)) {
+                        return false;
+                    }
+                    if (remote.bundle.status === "cached") {
+                        const restored = await installBundle(literatureItem, identity, md);
+                        if (await markdownMatchesDocx(restored, docx)) {
+                            return true;
+                        }
+                        if (attachmentName(restored).toLowerCase()
+                            !== `${attachmentName(docx)}.md`.toLowerCase()) {
+                            await Zotero.Items.erase([restored.id]);
+                        }
+                        md = await localDocxMarkdown(literatureItem, docx);
+                    }
+                    await refreshMarkdown(literatureItem, docx, md);
+                    return true;
+                }
+                if (remote.pdf.status !== "cached"
+                    && remote.bundle.status === "cached" && !markdown) {
+                    await installBundle(literatureItem, identity);
+                    summary.mdOnly.push({ ...state.entry, url: "" });
+                    return true;
+                }
                 if (remote.pdf.status !== "cached" && !markdown && identity.searchable) {
                     remote = await getRemoteState(identity);
                 }
