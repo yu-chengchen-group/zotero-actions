@@ -6,7 +6,7 @@
 
 | 脚本 | 类型 | 菜单 | 使用 | 调用关系 |
 | --- | --- | --- | --- | --- |
-| `sync-attachments.js` | 显式 Action | 同步附件 | 学生 / 开发 | 调用 `document2md` |
+| `sync-attachments.js` | 显式 Action | 同步附件 | 学生 / 开发 | 按附件同步，调用 `document2md` |
 | `document2md.js` | 隐藏 Action | — | 内部 | 被“同步附件”调用 |
 | `sync-to-group.js` | 显式 Action | 同步到课题组 | 开发 | 独立 |
 | `item-reset.js` | 显式 Action | 条目重置 | 开发 | 调用三个清理 Action |
@@ -58,27 +58,31 @@ CHEN_GROUP_API_KEY_MEMBER=<普通成员>
 服务器接口：
 
 ```text
-GET https://api.chen-group.cn/v1/attachments?doi=...
-PUT https://api.chen-group.cn/v1/attachments?doi=...&kind=pdf|bundle
+GET https://api.chen-group.cn/v1/attachments?doi=...&cache_only=1
+GET https://api.chen-group.cn/v1/attachments?doi=...&attachment_id=ABCDEFGH&download=source|bundle
+PUT https://api.chen-group.cn/v1/attachments?doi=...&attachment_id=ABCDEFGH&kind=source|bundle
+PUT https://api.chen-group.cn/v1/attachments?doi=...&kind=manifest
 ```
 
 - 只在个人库写入附件；Group Library 中执行会拒绝。
-- 教师和学生都先以 8 路并发执行 `cache_only=1` 服务器检查；进度分别显示“已检查”和“已处理”，进度条在检查阶段从 0% 到 50%、处理阶段从 50% 到 100%，不倒退，也不由多个 worker 相互覆盖条目标题。
-- `CHEN_GROUP_API_KEY` 为教师发布模式：必须明确选择文献或 Collection；本地 PDF 是 source-of-truth。服务器 PDF SHA-256 与本地一致且 bundle 已存在时直接记为“已一致”，否则才串行发布。
-- `CHEN_GROUP_API_KEY_MEMBER` 为学生消费模式：只允许 GET，不调用附件 PUT。服务器 PDF SHA-256 与本地不一致时，以服务器版本替换本地 PDF 和 bundle；缺 PDF 时仍由 paper-service 检索全文。
-- 教师缺失/失配 Markdown 时调用本地 document2md；学生缺失/失配 Markdown 时调用公网 document2md，由服务器走官方 API。
-- PDF 转换得到的 Markdown 第一行固定记录 `<!-- document2md-source-pdf-sha256: ... -->`，`sync-attachments.js` 用它验证本地 Markdown 与 PDF 是否一致。
-- bundle 保持 Markdown 和 `d2md_fig_*` 原文件名。
+- `CHEN_GROUP_API_KEY` 为教师发布模式：需明确选择文献/附件或 Collection；逐附件上传原文件和来源对应的 Markdown ZIP，最后一次性提交 manifest。删除本地附件不删除云端缓存。
+- `CHEN_GROUP_API_KEY_MEMBER` 为学生消费模式：只允许 GET，8 路并发处理文献，document2md 任务串行；从完整清单下载正文、SI 和其他文件，缺产物时本地转换。
+- 云端附件 ID 使用教师源附件 Key，学生下载后通过 `@chen-source:<ID>` 标签关联，不使用学生个人文库的 Key 判断缓存。
+- 生成的 MD 使用 `@chen-md:<ID>` 与来源关联；首行写 `<!-- document2md-source-sha256: ... -->`，跨格式校验源文件。
+- 云端源文件与本地内容冲突时保留本地原件，不自动覆盖；转换产生新 MD 后才删除旧的受管理 MD。
+- bundle 包含一个 Markdown、图片及 `provenance.json`；manifest 提交前严格校验对应原文件哈希。
 - 附件接口限流返回 429；客户端对 429/503 每 500 ms 重试，最多 10 次。
 - 有真实 DOI 时以规范化 DOI 作为附件缓存身份。
-- 无 DOI 时在父条目 Extra 中保存一次性固定 `Cache-Key: chen:<UUIDv4>`；Zotero 元数据同步后，各设备使用同一 Cache-Key 共享 PDF/bundle 缓存。
+- 无 DOI 时在父条目 Extra 保存 `Cache-Key: chen:<UUIDv4>`；`sync-to-group` 在复制元数据前生成它，学生只读取，禁止自行生成共享 Key。
 - Cache-Key 只用于附件缓存，不写入 DOI 字段；无 DOI 条目不会触发 paper-service DOI 全文检索，只复用已有缓存或处理本地 PDF。
+- 旧版单 PDF 接口、ZIP 结构及缓存不作兼容或迁移；客户端和服务器必须同时升级并重新发布。
 
 ## 同步到课题组
 
 目标 Group ID 固定为 `6669851`。
 
 - citationkey 是条目匹配主键；缺失或群组中重复时跳过，不用标题猜测。
+- 无 DOI 的个人文献先生成共享 Cache-Key，再复制群组元数据，确保学生个人库可查询云端附件。
 - 新条目跨库复制并建立 linked-item 关系；保存前保留源 citationkey。
 - Collection 使用 linked-collection 关系保持重命名和移动后的对应关系。
 - 选条目时严格镜像该条目的元数据与 Tags；选 Collection 时严格镜像其子树、条目、Tags 和 membership。
@@ -89,10 +93,10 @@ PUT https://api.chen-group.cn/v1/attachments?doi=...&kind=pdf|bundle
 ## document2md 与 UI
 
 - `document2md.js` 是唯一文档转 Markdown+FIG 实现。
-- `document2md` 服务直接在 PDF Markdown 第一行写入 `document2md-source-pdf-sha256` provenance；`document2md.js` 原样保存 `page_content`，不重复计算或拼接 hash。
+- `document2md` 服务仍提供 PDF 来源哈希；`document2md.js` 统一在所有支持格式的 MD 首行加入 `document2md-source-sha256` 供同步验证。
 - `sync-attachments.js` 通过 `dispatchActionByKey()` 调用它。
 - `document2md.js` 为隐藏 Action，不显示独立进度或汇总，转换任务串行执行。
-- “同步附件”统一使用 8 路并发执行服务器检查和学生后续同步更新；document2md 转换仍串行，教师发布始终串行。
+- “同步附件”学生按文献 8 路并发，document2md 转换串行；教师发布始终串行。
 - `document2md` 保留 `local` / `server` 两种后端。
 - 显式 Action 的进度使用 `Zotero.ProgressWindow`，确认和选择使用 `Services.prompt`。
 - 一次性迁移或修复脚本完成并核验后不长期保留。

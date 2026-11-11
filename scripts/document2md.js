@@ -34,6 +34,9 @@ const SOURCE_EXTENSIONS = new Set([
 ]);
 const IMAGE_EXTENSIONS = "bmp|jpeg|jpg|png|tif|tiff|webp";
 const GENERATED_IMAGE_PATTERN = new RegExp(`_fig_\\d{3,}\\.(?:${IMAGE_EXTENSIONS})$`, "i");
+const PROVENANCE_PATTERN = /^<!-- document2md-source-sha256: ([0-9a-f]{64}) -->$/;
+const CLOUD_SOURCE_PREFIX = "@chen-source:";
+const CLOUD_MD_PREFIX = "@chen-md:";
 
 
 function getInvocationItems() {
@@ -96,7 +99,8 @@ function attachmentName(attachment) {
 
 
 function sourceEntry(attachment) {
-    if (!attachment || attachment.deleted) {
+    if (!attachment || attachment.deleted || !attachment.isAttachment()
+        || attachment.attachmentLinkMode === Zotero.Attachments.LINK_MODE_LINKED_URL) {
         return null;
     }
     const name = attachmentName(attachment);
@@ -115,6 +119,58 @@ function sourceEntry(attachment) {
         attachment,
         file: { name, path },
     };
+}
+
+function cloudID(attachment, prefix) {
+    const tag = attachment.getTags().find(value =>
+        value.tag.startsWith(prefix) && /^[A-Z0-9]{8}$/.test(value.tag.slice(prefix.length))
+    );
+    return tag ? tag.tag.slice(prefix.length) : "";
+}
+
+function markdownName(literature, source) {
+    const name = source.file.name;
+    const duplicates = getSourceAttachments(literature)
+        .filter(value => value.file.name.toLowerCase() === name.toLowerCase());
+    return `${name}${duplicates.length > 1
+        ? `.${cloudID(source.attachment, CLOUD_SOURCE_PREFIX) || source.attachment.key}`
+        : ""}.md`;
+}
+
+function hashFile(path) {
+    const hash = Components.classes["@mozilla.org/security/hash;1"]
+        .createInstance(Components.interfaces.nsICryptoHash);
+    const stream = Components.classes["@mozilla.org/network/file-input-stream;1"]
+        .createInstance(Components.interfaces.nsIFileInputStream);
+    const file = Components.classes["@mozilla.org/file/local;1"]
+        .createInstance(Components.interfaces.nsIFile);
+    file.initWithPath(path);
+    stream.init(file, 0x01, 0, 0);
+    try {
+        hash.init(Components.interfaces.nsICryptoHash.SHA256);
+        hash.updateFromStream(stream, -1);
+        return Array.from(hash.finish(false), c =>
+            c.charCodeAt(0).toString(16).padStart(2, "0")).join("");
+    }
+    finally {
+        stream.close();
+    }
+}
+
+async function markdownMatches(attachment, sourcePath, expectedHash) {
+    if (!attachment || !attachment.isAttachment()
+        || !isGeneratedMarkdownAttachment(attachment)) {
+        return false;
+    }
+    const path = attachment.getFilePath();
+    if (!path || !await IOUtils.exists(path) || !sourcePath
+        || !await IOUtils.exists(sourcePath)) {
+        return false;
+    }
+    const first = String(await Zotero.File.getContentsAsync(path, "utf-8"))
+        .split(/\r?\n/, 1)[0];
+    const match = first.match(PROVENANCE_PATTERN);
+    return !!match && match[1] === expectedHash;
 }
 
 
@@ -202,14 +258,17 @@ async function setStatus(item, status) {
 }
 
 
-function allSourcesHaveMarkdown(literature) {
+async function allSourcesHaveMarkdown(literature) {
     const attachmentIndex = buildAttachmentIndex(literature);
     const sources = getSourceAttachments(literature);
     return (
         sources.length > 0
-        && sources.every(({ file }) => (
-            attachmentIndex.has(`${file.name}.md`.toLowerCase())
-        ))
+        && (await Promise.all(sources.map(async source => {
+            const existing = attachmentIndex.get(markdownName(literature, source).toLowerCase()) || [];
+            const { file } = source;
+            return existing.length === 1 && file.path && await IOUtils.exists(file.path)
+                && await markdownMatches(existing[0], file.path, hashFile(file.path));
+        }))).every(Boolean)
     );
 }
 
@@ -245,27 +304,6 @@ function isGeneratedMarkdownAttachment(attachment) {
 }
 
 
-async function cleanupStaleMarkdownAttachments(literature) {
-    const expectedNames = new Set(
-        getSourceAttachments(literature)
-            .map(({ file }) => `${file.name}.md`.toLowerCase())
-    );
-    const removeIDs = [];
-
-    for (const [name, attachments] of buildAttachmentIndex(literature)) {
-        const generated = attachments.filter(isGeneratedMarkdownAttachment);
-        if (!generated.length) {
-            continue;
-        }
-        const remove = expectedNames.has(name) ? generated.slice(1) : generated;
-        removeIDs.push(...remove.map(attachment => attachment.id));
-    }
-
-    if (removeIDs.length) {
-        await Zotero.Items.erase(removeIDs);
-    }
-}
-
 function removeTemporaryDirectory(directory) {
     try {
         if (directory && directory.exists()) {
@@ -284,40 +322,30 @@ async function writeMarkdownAttachment(item, attachmentIndex, filename, markdown
     if (existing.length > 1) {
         throw new Error(`输出附件重名：${filename}`);
     }
-
-    let result;
-    if (existing.length === 1) {
-        result = existing[0];
-        await Zotero.File.putContentsAsync(
-            result.getFilePath(),
-            markdown,
-            "utf-8",
-        );
+    if (existing.length && !isGeneratedMarkdownAttachment(existing[0])) {
+        throw new Error(`拒绝覆盖非自动生成的 Markdown：${filename}`);
     }
-    else {
-        const directory = await Zotero.Attachments.createTemporaryStorageDirectory();
-        const fileObject = Zotero.File.pathToFile(directory.path);
-        fileObject.append(filename);
-
-        try {
-            await Zotero.File.putContentsAsync(fileObject.path, markdown, "utf-8");
-            result = await Zotero.Attachments.importFromFile({
-                file: fileObject.path,
-                parentItemID: item.id,
-                title: "Markdown",
-                contentType: "text/markdown",
-            });
-        }
-        finally {
-            removeTemporaryDirectory(directory);
-        }
-        attachmentIndex.set(key, [result]);
+    const directory = await Zotero.Attachments.createTemporaryStorageDirectory();
+    const fileObject = Zotero.File.pathToFile(directory.path);
+    fileObject.append(filename);
+    let result;
+    try {
+        await Zotero.File.putContentsAsync(fileObject.path, markdown, "utf-8");
+        result = await Zotero.Attachments.importFromFile({
+            file: fileObject.path,
+            parentItemID: item.id,
+            title: "Markdown",
+            contentType: "text/markdown",
+        });
+    }
+    finally {
+        removeTemporaryDirectory(directory);
     }
 
     if (Zotero.FullText) {
         await Zotero.FullText.queueItem(result);
     }
-    return result;
+    return { result, previous: existing[0] || null };
 }
 
 
@@ -564,24 +592,29 @@ async function cleanupGeneratedAssets(
 }
 
 
-async function writeConvertedDocument(item, sourceName, document) {
+async function writeConvertedDocument(item, source, document, expectedHash) {
     const assets = document.assets || {};
     const attachmentIndex = buildAttachmentIndex(item);
-    const markdownName = `${sourceName}.md`;
+    const sourceName = source.file.name;
+    const outputName = markdownName(item, source);
     let markdownAttachment;
+    let previous;
 
     try {
-        markdownAttachment = await writeMarkdownAttachment(
+        const imported = await writeMarkdownAttachment(
             item,
             attachmentIndex,
-            markdownName,
-            document.page_content
+            outputName,
+            `<!-- document2md-source-sha256: ${expectedHash} -->\n\n${document.page_content}`
         );
+        markdownAttachment = imported.result;
+        previous = imported.previous;
     }
     catch (error) {
         throw markError(error, "local", "写入 Markdown", sourceName);
     }
 
+    try {
     const storageDirectory = Zotero.Attachments.getStorageDirectory(markdownAttachment);
     const oldSidecars = await generatedSidecars(storageDirectory);
     const keepNames = new Set();
@@ -645,6 +678,25 @@ async function writeConvertedDocument(item, sourceName, document) {
         throw markError(error, "local", "标记附件同步", sourceName);
     }
 
+    const relatedID = cloudID(source.attachment, CLOUD_SOURCE_PREFIX)
+        || source.attachment.key;
+    markdownAttachment.addTag(`${CLOUD_MD_PREFIX}${relatedID}`);
+    await markdownAttachment.saveTx();
+    if (previous && previous.id !== markdownAttachment.id) {
+        await Zotero.Items.erase([previous.id]);
+    }
+    }
+    catch (error) {
+        if (markdownAttachment) {
+            try {
+                await Zotero.Items.erase([markdownAttachment.id]);
+            }
+            catch (cleanupError) {
+                Zotero.logError(cleanupError);
+            }
+        }
+        throw error;
+    }
 }
 
 
@@ -665,20 +717,7 @@ function duplicateSourceNames(sources) {
 async function processScope(scope) {
     const { literature, allSources, sources } = scope;
 
-    try {
-        await cleanupStaleMarkdownAttachments(literature);
-    }
-    catch (error) {
-        logError(error);
-        await setStatus(literature, STATUS_FAILED);
-        return {
-            status: "failed",
-            details: [`清理旧 Markdown｜${errorMessage(error)}`],
-            stopBatch: true,
-        };
-    }
-
-    if (allSources && allSourcesHaveMarkdown(literature)) {
+    if (allSources && await allSourcesHaveMarkdown(literature)) {
         await setStatus(literature, STATUS_SUCCESS);
         return { status: "skipped" };
     }
@@ -690,15 +729,6 @@ async function processScope(scope) {
         };
     }
 
-    const duplicates = duplicateSourceNames(sources);
-    if (duplicates.length) {
-        await setStatus(literature, STATUS_FAILED);
-        return {
-            status: "failed",
-            details: [`源附件文件名重复：${duplicates.join("、")}`],
-        };
-    }
-
     await setStatus(literature, STATUS_PROCESSING);
     if (allSources) {
         literature.removeTag(STATUS_REFERENCE_REVIEW);
@@ -707,10 +737,23 @@ async function processScope(scope) {
     const failures = [];
     let referenceReview = false;
 
-    for (const { attachment, file } of sources) {
+    for (const source of sources) {
+        const { attachment, file } = source;
         try {
+            if (!file.path || !await IOUtils.exists(file.path)) {
+                throw markError(new Error("本地源文件不存在"), "file", "读取源文件", file.name);
+            }
+            const expected = hashFile(file.path);
+            const name = markdownName(literature, source);
+            const existing = buildAttachmentIndex(literature).get(name.toLowerCase()) || [];
+            if (existing.length === 1 && await markdownMatches(existing[0], file.path, expected)) {
+                continue;
+            }
             const document = await convertFile(file, attachment);
-            await writeConvertedDocument(literature, file.name, document);
+            if (hashFile(file.path) !== expected) {
+                throw markError(new Error("转换期间源文件发生变化"), "local", "校验源文件", file.name);
+            }
+            await writeConvertedDocument(literature, source, document, expected);
             referenceReview = referenceReview || document.reference_review === true;
         }
         catch (error) {
@@ -744,7 +787,7 @@ async function processScope(scope) {
 
     await setStatus(
         literature,
-        allSourcesHaveMarkdown(literature) ? STATUS_SUCCESS : null
+        await allSourcesHaveMarkdown(literature) ? STATUS_SUCCESS : null
     );
 
     return { status: "success" };
@@ -752,9 +795,6 @@ async function processScope(scope) {
 
 
 await (async () => {
-    if (typeof item !== "undefined" && item) {
-        return;
-    }
     assertPersonalLibrary();
     if (!ACTIVE_API) {
         throw new Error("无法确定 document2md 调用模式");
