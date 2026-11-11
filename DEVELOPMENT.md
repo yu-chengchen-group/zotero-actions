@@ -113,5 +113,7 @@ PUT https://api.chen-group.cn/v1/attachments?doi=...&kind=manifest
 才提示输入，并验证新 Key 后写入。安装器只维护成员 Key；document2md 后端由脚本根据 Key 自动确定。
 重复运行只更新原 Action，不会创建重复项。
 
+开发维护时先正常关闭 Zotero，再运行 `python tools/install-checked-actions.py`，以当前 `scripts/` 源码原位更新已安装的同步、转 MD 与群组 Action；自动备份 `prefs.js` 并验证脚本一致性。此脚本不会改写用户已有的 Action 设置或 API Key。
+
 Release 中的 `zotero-actions-student.zip` 由 `package-student.ps1` 生成，只包含 README、`install.cmd`、`update.cmd`、`doctor.cmd`、`uninstall.cmd`、`installer.ps1`、`maintenance.ps1`、`sync-attachments.js` 和 `document2md.js`。不要手工维护另一份打包清单。
 
