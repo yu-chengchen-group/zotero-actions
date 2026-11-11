@@ -133,7 +133,6 @@ test("同步个人条目前先加载 itemData", async () => {
         isRegularItem: () => true,
         getField(field) {
             if (field === "title") return "懒加载样本文献";
-            if (field === "DOI") return "10.1000/test";
             if (field === "citationKey") {
                 assert.equal(loaded, true);
                 return "lazy-source-key";

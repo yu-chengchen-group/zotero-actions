@@ -1,6 +1,5 @@
 // 菜单名称：同步到课题组
 const TARGET_GROUP_ID = 6669851;
-const CACHE_KEY_PATTERN = /^chen:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 
 function getInvocationItems() {
@@ -86,26 +85,6 @@ async function resolveScope() {
 
 function citationKey(literature) {
     return String(literature.getField("citationKey") || "").trim();
-}
-
-async function ensureSharedIdentity(literature) {
-    const doi = String(literature.getField("DOI") || "").trim()
-        .replace(/^doi:\s*/i, "").replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, "");
-    if (/^10\.\d{4,9}\/\S+$/i.test(doi)) {
-        return;
-    }
-    const extra = String(literature.getField("extra") || "");
-    const match = extra.match(/^Cache-Key:\s*(\S+)\s*$/im);
-    if (match) {
-        if (!CACHE_KEY_PATTERN.test(match[1])) {
-            throw new Error("源文献 Cache-Key 格式无效");
-        }
-        return;
-    }
-    const uuid = Services.uuid.generateUUID().toString().replace(/[{}]/g, "").toLowerCase();
-    const separator = extra && !/\r?\n$/.test(extra) ? "\n" : "";
-    literature.setField("extra", `${extra}${separator}Cache-Key: chen:${uuid}`);
-    await literature.saveTx();
 }
 
 
@@ -285,7 +264,6 @@ async function mirrorItem(source, context) {
         throw new Error("同步到课题组只允许在“我的文库”中执行");
     }
     await Zotero.Items.loadDataTypes([source]);
-    await ensureSharedIdentity(source);
     const key = citationKey(source);
     if (!key) {
         throw new Error(`缺少 citationkey：${titleOf(source)}`);
