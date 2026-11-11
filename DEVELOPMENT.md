@@ -58,20 +58,23 @@ CHEN_GROUP_API_KEY_MEMBER=<普通成员>
 服务器接口：
 
 ```text
-GET https://api.chen-group.cn/v1/attachments?doi=...
-PUT https://api.chen-group.cn/v1/attachments?doi=...&kind=pdf|bundle
+GET https://api.chen-group.cn/v1/attachments?doi=...&cache_only=1
+GET https://api.chen-group.cn/v1/attachments?doi=...&attachment_id=ABCDEFGH&download=source|bundle
+PUT https://api.chen-group.cn/v1/attachments?doi=...&attachment_id=ABCDEFGH&kind=source|bundle
+PUT https://api.chen-group.cn/v1/attachments?doi=...&kind=manifest
 ```
 
 - 只在个人库写入附件；Group Library 中执行会拒绝。
 - 教师和学生都先以 8 路并发执行 `cache_only=1` 服务器检查；进度分别显示“已检查”和“已处理”，进度条在检查阶段从 0% 到 50%、处理阶段从 50% 到 100%，不倒退，也不由多个 worker 相互覆盖条目标题。
-- `CHEN_GROUP_API_KEY` 为教师发布模式：必须明确选择文献或 Collection；本地 PDF 是 source-of-truth。服务器 PDF SHA-256 与本地一致且 bundle 已存在时直接记为“已一致”，否则才串行发布。
-- `CHEN_GROUP_API_KEY_MEMBER` 为学生消费模式：只允许 GET，不调用附件 PUT。服务器 PDF SHA-256 与本地不一致时，以服务器版本替换本地 PDF 和 bundle；缺 PDF 时仍由 paper-service 检索全文。
+- `CHEN_GROUP_API_KEY` 为教师发布模式：必须明确选择文献或 Collection；逐附件上传源文件及 MD，最后原子发布文献附件清单。
+- `CHEN_GROUP_API_KEY_MEMBER` 为学生消费模式：只允许 GET，依文件名、SHA-256 匹配下载全部附件；文件名相同而哈希不同的本地原件绝不覆盖。
 - 教师缺失/失配 Markdown 时调用本地 document2md；学生缺失/失配 Markdown 时调用公网 document2md，由服务器走官方 API。
 - PDF 转换得到的 Markdown 第一行固定记录 `<!-- document2md-source-pdf-sha256: ... -->`，`sync-attachments.js` 用它验证本地 Markdown 与 PDF 是否一致。
-- bundle 保持 Markdown 和 `d2md_fig_*` 原文件名。
+- bundle 保持 Markdown 和 `d2md_fig_*` 原文件名，并增加 `provenance.json` 绑定来源附件。
 - 附件接口限流返回 429；客户端对 429/503 每 500 ms 重试，最多 10 次。
 - 有真实 DOI 时以规范化 DOI 作为附件缓存身份。
-- 无 DOI 时在父条目 Extra 中保存一次性固定 `Cache-Key: chen:<UUIDv4>`；Zotero 元数据同步后，各设备使用同一 Cache-Key 共享 PDF/bundle 缓存。
+- 无 DOI 时由教师生成一次固定 `Cache-Key: chen:<UUIDv4>`，在同步到群组前写入 Extra；学生缺少共享 Cache-Key 时仅报告错误，不自行生成。
+- 不建立本地映射、不新增 Zotero 身份 Tag；文件名冲突或源文件哈希冲突时只报告，不覆盖。
 - Cache-Key 只用于附件缓存，不写入 DOI 字段；无 DOI 条目不会触发 paper-service DOI 全文检索，只复用已有缓存或处理本地 PDF。
 
 ## 同步到课题组
@@ -79,6 +82,7 @@ PUT https://api.chen-group.cn/v1/attachments?doi=...&kind=pdf|bundle
 目标 Group ID 固定为 `6669851`。
 
 - citationkey 是条目匹配主键；缺失或群组中重复时跳过，不用标题猜测。
+- 无 DOI 的条目先保存共享 Cache-Key，再复制到群组。
 - 新条目跨库复制并建立 linked-item 关系；保存前保留源 citationkey。
 - Collection 使用 linked-collection 关系保持重命名和移动后的对应关系。
 - 选条目时严格镜像该条目的元数据与 Tags；选 Collection 时严格镜像其子树、条目、Tags 和 membership。

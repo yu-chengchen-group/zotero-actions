@@ -1,5 +1,6 @@
 // 菜单名称：同步到课题组
 const TARGET_GROUP_ID = 6669851;
+const CACHE_KEY_PATTERN = /^chen:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 
 function getInvocationItems() {
@@ -85,6 +86,27 @@ async function resolveScope() {
 
 function citationKey(literature) {
     return String(literature.getField("citationKey") || "").trim();
+}
+
+async function ensureSharedCacheKey(literature) {
+    const doi = String(literature.getField("DOI") || "").trim()
+        .replace(/^doi:\s*/i, "")
+        .replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, "");
+    if (/^10\.\d{4,9}\/\S+$/i.test(doi)) {
+        return;
+    }
+    const extra = String(literature.getField("extra") || "");
+    const match = extra.match(/^Cache-Key:\s*(\S+)\s*$/im);
+    if (match) {
+        if (!CACHE_KEY_PATTERN.test(match[1])) {
+            throw new Error("文献 Extra 中的 Cache-Key 格式无效");
+        }
+        return;
+    }
+    const uuid = Services.uuid.generateUUID().toString().replace(/[{}]/g, "").toLowerCase();
+    const separator = extra && !/\r?\n$/.test(extra) ? "\n" : "";
+    literature.setField("extra", `${extra}${separator}Cache-Key: chen:${uuid}`);
+    await literature.saveTx();
 }
 
 
@@ -271,6 +293,7 @@ async function mirrorItem(source, context) {
     if (context.targetIndex.has(key) && context.targetIndex.get(key) === null) {
         throw new Error(`群组中 citationkey 重复：${key}`);
     }
+    await ensureSharedCacheKey(source);
 
     let target = context.targetIndex.get(key);
     const created = !target;

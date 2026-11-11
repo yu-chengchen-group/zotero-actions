@@ -17,6 +17,10 @@ const CACHE_KEY_PREFIX = "chen:";
 const CACHE_KEY_PATTERN = /^chen:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SOURCE_PDF_SHA256_PATTERN = /^<!-- document2md-source-pdf-sha256: ([0-9a-f]{64}) -->$/;
 const SOURCE_DOCX_SHA256_PATTERN = /^<!-- document2md-source-docx-sha256: ([0-9a-f]{64}) -->$/;
+const CONVERTIBLE_EXTENSIONS = new Set([
+    ".pdf", ".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp",
+    ".csv", ".docx", ".html", ".htm", ".pptx", ".xlsx",
+]);
 
 
 function getInvocationItems() {
@@ -145,9 +149,13 @@ async function attachmentIdentity(literature) {
     if (doi) {
         return { parameter: "doi", value: doi, searchable: true };
     }
+    const existing = cacheKeyFromExtra(literature);
+    if (!existing && !IS_PUBLISHER) {
+        throw new Error("无 DOI 文献缺少群组共享 Cache-Key，学生不能自行生成");
+    }
     return {
         parameter: "cache_key",
-        value: await ensureCacheKey(literature),
+        value: existing || await ensureCacheKey(literature),
         searchable: false,
     };
 }
@@ -262,6 +270,69 @@ async function localDocxMarkdown(literature, docx) {
         ? markdown : null;
 }
 
+async function sourceAttachments(literature) {
+    const result = [];
+    for (const id of literature.getAttachments()) {
+        const attachment = await Zotero.Items.getAsync(id);
+        if (!attachment || !attachment.isAttachment() || attachment.deleted
+            || attachment.attachmentLinkMode === Zotero.Attachments.LINK_MODE_LINKED_URL) {
+            continue;
+        }
+        const name = attachmentName(attachment);
+        if (/\.md$/i.test(name) || GENERATED_FIG_PATTERN.test(name)) {
+            continue;
+        }
+        result.push(attachment);
+    }
+    const names = new Set();
+    for (const attachment of result) {
+        const name = attachmentName(attachment).toLowerCase();
+        if (names.has(name)) {
+            throw new Error(`源附件重名，拒绝猜测关联：${name}`);
+        }
+        names.add(name);
+    }
+    return result;
+}
+
+function canConvert(attachment) {
+    const name = attachmentName(attachment);
+    return CONVERTIBLE_EXTENSIONS.has(name.slice(name.lastIndexOf(".")).toLowerCase());
+}
+
+async function matchingMarkdown(literature, source) {
+    const name = `${attachmentName(source)}.md`.toLowerCase();
+    const matches = [];
+    for (const id of literature.getAttachments()) {
+        const attachment = await Zotero.Items.getAsync(id);
+        if (attachment && attachment.isAttachment()
+            && attachmentName(attachment).toLowerCase() === name) {
+            matches.push(attachment);
+        }
+    }
+    if (matches.length > 1) {
+        throw new Error(`Markdown 附件重名：${name}`);
+    }
+    return matches[0] || null;
+}
+
+async function matchesSource(markdown, source) {
+    if (!markdown) {
+        return false;
+    }
+    const mdPath = await markdown.getFilePathAsync();
+    if (!mdPath || !await IOUtils.exists(mdPath)) {
+        return false;
+    }
+    if (isPdfAttachment(source)) {
+        return markdownMatchesPdf(markdown, source);
+    }
+    if (/\.docx$/i.test(attachmentName(source))) {
+        return markdownMatchesDocx(markdown, source);
+    }
+    return true;
+}
+
 
 function authHeaders(extra = {}) {
     return { Authorization: `Bearer ${API_KEY}`, ...extra };
@@ -322,6 +393,9 @@ async function getRemoteState(identity, cacheOnly = false) {
     if (payload.pdf && payload.pdf.status === "failed") {
         throw new Error(payload.pdf.error || "全文搜索失败");
     }
+    if (!Array.isArray(payload.attachments)) {
+        throw new Error("云端未返回有效附件清单");
+    }
     return payload;
 }
 
@@ -367,27 +441,45 @@ async function downloadPdf(literature, key, url) {
 }
 
 
-async function replacePdf(literature, key, url, existing) {
-    const response = await httpRequest("GET", url, {
-        responseType: "arraybuffer",
-        successCodes: false,
-        timeout: 0,
-    });
-    if (response.status < 200 || response.status >= 300 || !isPdfBuffer(response.response)) {
-        throw new Error(`PDF 下载失败：HTTP ${response.status}`);
+async function downloadSource(literature, identity, record) {
+    const response = await httpRequest(
+        "GET",
+        `${ATTACHMENTS_API}?${identityQuery(identity)}&attachment_id=${record.id}&download=source`,
+        {
+            headers: authHeaders(),
+            responseType: "arraybuffer",
+            successCodes: false,
+            timeout: 0,
+        }
+    );
+    if (response.status < 200 || response.status >= 300) {
+        throw new Error(`源附件下载失败：${record.filename} · HTTP ${response.status}`);
     }
-    if (!existing) {
-        return downloadPdf(literature, key, url);
+    const directory = await Zotero.Attachments.createTemporaryStorageDirectory();
+    const file = Zotero.File.pathToFile(directory.path);
+    file.append(record.filename);
+    try {
+        await Zotero.File.putContentsAsync(file.path, new Blob([response.response]));
+        if (sha256File(file.path) !== record.sha256) {
+            throw new Error(`源附件哈希不一致：${record.filename}`);
+        }
+        return Zotero.Attachments.importFromFile({
+            file: file.path,
+            parentItemID: literature.id,
+            title: record.filename,
+            contentType: record.content_type,
+        });
     }
-    const path = await existing.getFilePathAsync();
-    if (!path || !await IOUtils.exists(path)) {
-        throw new Error("本地 PDF 文件不存在，无法原位更新");
+    finally {
+        removeTemporaryDirectory(directory);
     }
-    await Zotero.File.putContentsAsync(path, new Blob([response.response]));
-    if (Zotero.FullText) {
-        await Zotero.FullText.queueItem(existing);
-    }
-    return existing;
+}
+
+async function findLocalSource(literature, record) {
+    const attachments = await sourceAttachments(literature);
+    return attachments.find(source =>
+        attachmentName(source).toLowerCase() === record.filename.toLowerCase()
+    ) || null;
 }
 
 
@@ -485,10 +577,10 @@ async function setMarkdownSuccess(literature) {
 }
 
 
-async function installBundle(literature, identity, existingMarkdown = null) {
+async function installBundle(literature, identity, record, existingMarkdown = null) {
     const response = await httpRequest(
         "GET",
-        `${ATTACHMENTS_API}?${identityQuery(identity)}&download=bundle`,
+        `${ATTACHMENTS_API}?${identityQuery(identity)}&attachment_id=${record.id}&download=bundle`,
         {
             headers: authHeaders(),
             responseType: "arraybuffer",
@@ -504,6 +596,10 @@ async function installBundle(literature, identity, existingMarkdown = null) {
     const zipFile = Zotero.File.pathToFile(directory.path);
     zipFile.append("bundle.zip");
     await Zotero.File.putContentsAsync(zipFile.path, new Blob([response.response]));
+    if (sha256File(zipFile.path) !== record.bundle_sha256) {
+        removeTemporaryDirectory(directory);
+        throw new Error(`Markdown ZIP 校验失败：${record.filename}`);
+    }
 
     const reader = Components.classes["@mozilla.org/libjar/zip-reader;1"]
         .createInstance(Components.interfaces.nsIZipReader);
@@ -527,9 +623,23 @@ async function installBundle(literature, identity, existingMarkdown = null) {
     }
 
     const markdownFiles = extracted.filter(path => /\.md$/i.test(path));
-    if (markdownFiles.length !== 1) {
+    const provenancePath = extracted.find(path => /[\\/]provenance\.json$/.test(path));
+    let provenance = null;
+    if (provenancePath) {
+        try {
+            provenance = JSON.parse(await Zotero.File.getContentsAsync(provenancePath, "utf-8"));
+        }
+        catch (error) {
+            Zotero.logError(error);
+        }
+    }
+    if (markdownFiles.length !== 1 || !provenance
+        || provenance.attachment_id !== record.id
+        || provenance.source_sha256 !== record.sha256
+        || markdownFiles[0].split(/[\\/]/).pop().toLowerCase()
+            !== `${record.filename}.md`.toLowerCase()) {
         removeTemporaryDirectory(directory);
-        throw new Error("Bundle 中 Markdown 文件数量必须为 1");
+        throw new Error(`Markdown ZIP 与源附件不匹配：${record.filename}`);
     }
 
     let markdown = null;
@@ -574,7 +684,7 @@ async function installBundle(literature, identity, existingMarkdown = null) {
 }
 
 
-async function createBundle(markdown) {
+async function createBundle(markdown, attachmentID, sourceHash) {
     const markdownPath = await markdown.getFilePathAsync();
     if (!markdownPath || !await IOUtils.exists(markdownPath)) {
         throw new Error("Markdown 本地文件不存在");
@@ -583,10 +693,19 @@ async function createBundle(markdown) {
     const directory = await Zotero.Attachments.createTemporaryStorageDirectory();
     const zipFile = Zotero.File.pathToFile(directory.path);
     zipFile.append("bundle.zip");
+    const provenanceFile = Zotero.File.pathToFile(directory.path);
+    provenanceFile.append("provenance.json");
+    await Zotero.File.putContentsAsync(provenanceFile.path, JSON.stringify({
+        attachment_id: attachmentID,
+        source_sha256: sourceHash,
+    }), "utf-8");
     const writer = Components.classes["@mozilla.org/zipwriter;1"]
         .createInstance(Components.interfaces.nsIZipWriter);
     writer.open(zipFile, 0x04 | 0x08 | 0x20);
     try {
+        writer.addEntryFile(
+            "provenance.json", writer.COMPRESSION_DEFAULT, provenanceFile, false
+        );
         const markdownFile = nsFile(markdownPath);
         writer.addEntryFile(
             markdownFile.leafName,
@@ -614,13 +733,17 @@ async function createBundle(markdown) {
 }
 
 
-async function uploadFile(identity, kind, path, contentType) {
+async function uploadFile(identity, kind, path, contentType, attachmentID = "", filename = "") {
     const body = await IOUtils.read(path);
     const response = await httpRequest(
         "PUT",
-        `${ATTACHMENTS_API}?${identityQuery(identity)}&kind=${kind}`,
+        `${ATTACHMENTS_API}?${identityQuery(identity)}&kind=${kind}${attachmentID
+            ? `&attachment_id=${attachmentID}` : ""}`,
         {
-            headers: authHeaders({ "Content-Type": contentType }),
+            headers: authHeaders({
+                "Content-Type": contentType,
+                ...(filename ? { "X-Filename": encodeURIComponent(filename) } : {}),
+            }),
             body,
             responseType: "json",
             successCodes: false,
@@ -631,6 +754,23 @@ async function uploadFile(identity, kind, path, contentType) {
         throw new Error(`${kind} 上传失败：HTTP ${response.status}`);
     }
     return response.response;
+}
+
+async function publishManifest(identity, records) {
+    const response = await httpRequest(
+        "PUT",
+        `${ATTACHMENTS_API}?${identityQuery(identity)}&kind=manifest`,
+        {
+            headers: authHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify({ attachments: records }),
+            responseType: "json",
+            successCodes: false,
+            timeout: 0,
+        }
+    );
+    if (response.status < 200 || response.status >= 300) {
+        throw new Error(`附件清单提交失败：HTTP ${response.status}`);
+    }
 }
 
 
@@ -801,37 +941,6 @@ let activeBatch = null;
         Zotero.logError(error);
     }
 
-    function remotePdfSha256(remote) {
-        const value = remote && remote.pdf && remote.pdf.source_pdf_sha256;
-        return typeof value === "string" && /^[0-9a-f]{64}$/.test(value)
-            ? value
-            : "";
-    }
-
-    async function publishAttachments(identity, pdf, markdown, uploadPdf = true) {
-        updateBatchProgress(
-            batch,
-            processed,
-            literature.length,
-            "处理中 · 发布至服务器"
-        );
-        if (uploadPdf) {
-            const pdfPath = await pdf.getFilePathAsync();
-            if (!pdfPath || !await IOUtils.exists(pdfPath)) {
-                throw new Error("PDF 本地文件不存在");
-            }
-            await uploadFile(identity, "pdf", pdfPath, "application/pdf");
-        }
-
-        const bundle = await createBundle(markdown);
-        try {
-            await uploadFile(identity, "bundle", bundle.path, "application/zip");
-        }
-        finally {
-            removeTemporaryDirectory(bundle.directory);
-        }
-    }
-
     function runDocument2mdSerial(pdf) {
         const current = document2mdTail.then(() => runDocument2md(pdf));
         document2mdTail = current.catch(() => {});
@@ -843,16 +952,13 @@ let activeBatch = null;
         const sourcePath = isDocx ? await source.getFilePathAsync() : null;
         const sourceHash = isDocx && sourcePath ? sha256File(sourcePath) : "";
         await runDocument2mdSerial(source);
-        const markdown = isDocx
-            ? await localDocxMarkdown(literatureItem, source)
-            : await localMarkdown(literatureItem, source);
+        const markdown = await matchingMarkdown(literatureItem, source);
         if (!markdown) {
             throw new Error("document2md 未生成 Markdown");
         }
         if (isDocx) {
-            if (!sourceHash || sourceHash !== sha256File(sourcePath)
-                || !literatureItem.getTags().some(tag => tag.tag === "@md-已生成")) {
-                throw new Error("DOCX 转换失败或转换期间原文件发生变化");
+            if (!sourceHash || sourceHash !== sha256File(sourcePath)) {
+                throw new Error("DOCX 转换期间原文件发生变化");
             }
             const path = await markdown.getFilePathAsync();
             if (!path || !await IOUtils.exists(path)) {
@@ -880,6 +986,163 @@ let activeBatch = null;
             await Zotero.Items.erase([existingMarkdown.id]);
         }
         return markdown;
+    }
+
+    async function publishLiterature(state) {
+        const { literatureItem, identity } = state;
+        let remote = state.remote;
+        let sources = await sourceAttachments(literatureItem);
+        let changed = false;
+        if (!sources.length && identity.searchable) {
+            if (remote.pdf.status !== "cached") {
+                remote = await getRemoteState(identity);
+            }
+            if (remote.pdf.status === "cached") {
+                const pdf = await downloadPdf(
+                    literatureItem, state.key, remote.pdf.url
+                );
+                sources = [pdf];
+                changed = true;
+            }
+        }
+        if (!sources.length) {
+            if (remote.pdf.status === "manual" && remote.pdf.url) {
+                summary.manual.push({ ...state.entry, url: remote.pdf.url });
+            }
+            else {
+                summary.notFound.push(state.entry);
+            }
+            return changed;
+        }
+        const published = new Map(remote.attachments.map(record => [record.id, record]));
+        const next = new Map(published);
+        for (const source of sources) {
+            const filename = attachmentName(source);
+            const path = await source.getFilePathAsync();
+            if (!path || !await IOUtils.exists(path)) {
+                throw new Error(`源文件不可用：${filename}`);
+            }
+            const digest = sha256File(path);
+            const old = published.get(source.key);
+            const sourceMatches = old && old.sha256 === digest;
+            for (const entry of next.values()) {
+                if (entry.id !== source.key
+                    && entry.filename.toLowerCase() === filename.toLowerCase()) {
+                    next.delete(entry.id);
+                }
+            }
+            if (!sourceMatches) {
+                await uploadFile(
+                    identity, "source", path,
+                    source.attachmentContentType || "application/octet-stream",
+                    source.key, filename
+                );
+                changed = true;
+            }
+            let bundleHash = sourceMatches ? old.bundle_sha256 : null;
+            if (canConvert(source)) {
+                let markdown = await matchingMarkdown(literatureItem, source);
+                const valid = await matchesSource(markdown, source);
+                if (!valid || (!sourceMatches && !isPdfAttachment(source)
+                    && !/\.docx$/i.test(filename))) {
+                    updateBatchProgress(
+                        batch, processed, literature.length, "处理中 · Markdown 转换", filename
+                    );
+                    try {
+                        markdown = await refreshMarkdown(literatureItem, source, markdown);
+                    }
+                    catch (error) {
+                        bundleHash = null;
+                        Zotero.logError(error);
+                        summary.failed.push({
+                            ...state.entry,
+                            error: `${filename}｜${error.message || String(error)}`,
+                        });
+                        markdown = null;
+                    }
+                }
+                if (markdown && (!sourceMatches || !bundleHash)) {
+                    if (isPdfAttachment(source)
+                        && !await markdownMatchesPdf(markdown, source)) {
+                        bundleHash = null;
+                        summary.failed.push({
+                            ...state.entry,
+                            error: `${filename}｜Markdown 缺少匹配的 PDF 来源哈希`,
+                        });
+                        markdown = null;
+                    }
+                }
+                if (markdown && (!sourceMatches || !bundleHash)) {
+                    const bundle = await createBundle(markdown, source.key, digest);
+                    try {
+                        const result = await uploadFile(
+                            identity, "bundle", bundle.path, "application/zip", source.key
+                        );
+                        bundleHash = result.sha256;
+                        changed = true;
+                    }
+                    finally {
+                        removeTemporaryDirectory(bundle.directory);
+                    }
+                }
+            }
+            next.set(source.key, {
+                id: source.key,
+                filename,
+                content_type: source.attachmentContentType || "application/octet-stream",
+                sha256: digest,
+                bundle_sha256: bundleHash,
+            });
+        }
+        if (changed || next.size !== published.size) {
+            await publishManifest(identity, [...next.values()]);
+        }
+        return changed;
+    }
+
+    async function consumePublished(state) {
+        const { literatureItem, identity } = state;
+        const errors = [];
+        let changed = false;
+        for (const record of state.remote.attachments) {
+            try {
+                let source = await findLocalSource(literatureItem, record);
+                if (!source) {
+                    source = await downloadSource(literatureItem, identity, record);
+                    changed = true;
+                }
+                const path = await source.getFilePathAsync();
+                if (!path || !await IOUtils.exists(path)
+                    || sha256File(path) !== record.sha256) {
+                    throw new Error(`文件名相同但内容不同，保留本地附件：${record.filename}`);
+                }
+                const markdown = await matchingMarkdown(literatureItem, source);
+                if (markdown) {
+                    if (!await matchesSource(markdown, source)) {
+                        throw new Error(`现有 Markdown 来源不一致，保留本地文件：${record.filename}`);
+                    }
+                    continue;
+                }
+                if (record.bundle_sha256) {
+                    await installBundle(literatureItem, identity, record);
+                    changed = true;
+                }
+                else if (canConvert(source)) {
+                    updateBatchProgress(
+                        batch, processed, literature.length, "处理中 · Markdown 转换", record.filename
+                    );
+                    await refreshMarkdown(literatureItem, source, null);
+                    changed = true;
+                }
+            }
+            catch (error) {
+                errors.push(error.message || String(error));
+            }
+        }
+        if (errors.length) {
+            throw new Error(errors.join("；"));
+        }
+        return changed;
     }
 
     const states = new Array(literature.length);
@@ -951,84 +1214,7 @@ let activeBatch = null;
                 if (state.error) {
                     throw state.error;
                 }
-                let {
-                    literatureItem,
-                    identity,
-                    key,
-                    pdf,
-                    markdown,
-                    localPdfSha256,
-                    remote,
-                } = state;
-                let changed = false;
-
-                if (!pdf || !localPdfSha256) {
-                    const docx = await localDocx(literatureItem);
-                    if (docx && remote.pdf.status !== "cached") {
-                        let md = await localDocxMarkdown(literatureItem, docx);
-                        const needsConversion = !await markdownMatchesDocx(md, docx);
-                        if (needsConversion) {
-                            updateBatchProgress(
-                                batch, processed, literature.length, "处理中 · Markdown 转换"
-                            );
-                            md = await refreshMarkdown(literatureItem, docx, md);
-                        }
-                        if (needsConversion || remote.bundle.status !== "cached") {
-                            await publishAttachments(identity, null, md, false);
-                            addResult(true);
-                        }
-                        else {
-                            addResult(false);
-                        }
-                        continue;
-                    }
-                    if (remote.pdf.status !== "cached" && identity.searchable) {
-                        remote = await getRemoteState(identity);
-                    }
-                    if (remote.pdf.status === "cached") {
-                        pdf = await downloadPdf(literatureItem, key, remote.pdf.url);
-                        const pdfPath = await pdf.getFilePathAsync();
-                        if (!pdfPath || !await IOUtils.exists(pdfPath)) {
-                            throw new Error("自动获取 PDF 后本地文件不存在");
-                        }
-                        localPdfSha256 = sha256File(pdfPath);
-                        markdown = await localMarkdown(literatureItem, pdf);
-                        changed = true;
-                    }
-                    else if (remote.pdf.status === "manual" && remote.pdf.url) {
-                        summary.manual.push({ ...state.entry, url: remote.pdf.url });
-                        continue;
-                    }
-                    else {
-                        summary.notFound.push(state.entry);
-                        continue;
-                    }
-                }
-
-                const remoteHash = remotePdfSha256(remote);
-                const pdfMatches = (
-                    remote.pdf.status === "cached"
-                    && remoteHash === localPdfSha256
-                );
-                const bundleCached = remote.bundle.status === "cached";
-
-                if (!markdown || !await markdownMatchesPdf(markdown, pdf)) {
-                    updateBatchProgress(
-                        batch,
-                        processed,
-                        literature.length,
-                        "处理中 · Markdown 转换"
-                    );
-                    markdown = await refreshMarkdown(state.literatureItem, pdf, markdown);
-                }
-
-                if (pdfMatches && bundleCached) {
-                    addResult(changed);
-                }
-                else {
-                    await publishAttachments(state.identity, pdf, markdown, !pdfMatches);
-                    addResult(true);
-                }
+                addResult(await publishLiterature(state));
             }
             catch (error) {
                 addFailure(state.entry, error);
@@ -1047,95 +1233,45 @@ let activeBatch = null;
             if (state.error) {
                 throw state.error;
             }
-            let {
-                literatureItem,
-                identity,
-                key,
-                pdf,
-                markdown,
-                localPdfSha256,
-                remote,
-            } = state;
+            const { literatureItem, identity, key } = state;
+            let remote = state.remote;
+            if (remote.attachments.length) {
+                return consumePublished(state);
+            }
             let changed = false;
-
-            if (!pdf) {
-                const docx = await localDocx(literatureItem);
-                if (remote.pdf.status !== "cached" && docx) {
-                    let md = await localDocxMarkdown(literatureItem, docx);
-                    if (await markdownMatchesDocx(md, docx)) {
-                        return false;
-                    }
-                    if (remote.bundle.status === "cached") {
-                        const restored = await installBundle(literatureItem, identity, md);
-                        if (await markdownMatchesDocx(restored, docx)) {
-                            return true;
-                        }
-                        if (attachmentName(restored).toLowerCase()
-                            !== `${attachmentName(docx)}.md`.toLowerCase()) {
-                            await Zotero.Items.erase([restored.id]);
-                        }
-                        md = await localDocxMarkdown(literatureItem, docx);
-                    }
-                    await refreshMarkdown(literatureItem, docx, md);
-                    return true;
-                }
-                if (remote.pdf.status !== "cached"
-                    && remote.bundle.status === "cached" && !markdown) {
-                    await installBundle(literatureItem, identity);
-                    summary.mdOnly.push({ ...state.entry, url: "" });
-                    return true;
-                }
-                if (remote.pdf.status !== "cached" && !markdown && identity.searchable) {
+            let sources = await sourceAttachments(literatureItem);
+            if (!sources.length && identity.searchable) {
+                if (remote.pdf.status !== "cached") {
                     remote = await getRemoteState(identity);
                 }
                 if (remote.pdf.status === "cached") {
-                    pdf = await downloadPdf(literatureItem, key, remote.pdf.url);
-                    localPdfSha256 = remotePdfSha256(remote);
+                    const pdf = await downloadPdf(literatureItem, key, remote.pdf.url);
+                    sources = [pdf];
                     changed = true;
-                }
-                else if (markdown) {
-                    summary.mdOnly.push({
-                        ...state.entry,
-                        url: remote.pdf.status === "manual" ? remote.pdf.url : "",
-                    });
-                    return changed;
                 }
                 else if (remote.pdf.status === "manual" && remote.pdf.url) {
                     summary.manual.push({ ...state.entry, url: remote.pdf.url });
-                    return changed;
                 }
                 else {
                     summary.notFound.push(state.entry);
-                    return changed;
                 }
             }
-            else if (remote.pdf.status === "cached") {
-                const remoteHash = remotePdfSha256(remote);
-                if (!remoteHash || remoteHash !== localPdfSha256) {
-                    pdf = await replacePdf(literatureItem, key, remote.pdf.url, pdf);
-                    localPdfSha256 = remoteHash;
-                    changed = true;
-                    if (remote.bundle.status === "cached") {
-                        markdown = await installBundle(literatureItem, identity, markdown);
+            for (const source of sources) {
+                if (!canConvert(source)) {
+                    continue;
+                }
+                const markdown = await matchingMarkdown(literatureItem, source);
+                if (markdown) {
+                    if (!await matchesSource(markdown, source)) {
+                        throw new Error(`已有 Markdown 来源不一致，保留本地文件：${attachmentName(source)}`);
                     }
-                    else {
-                        markdown = await refreshMarkdown(literatureItem, pdf, markdown);
-                    }
-                    return true;
+                    continue;
                 }
-            }
-
-            if (!markdown || !await markdownMatchesPdf(markdown, pdf)) {
-                if (
-                    remote.pdf.status === "cached"
-                    && remote.bundle.status === "cached"
-                    && remotePdfSha256(remote) === localPdfSha256
-                ) {
-                    markdown = await installBundle(literatureItem, identity, markdown);
-                }
-                else {
-                    markdown = await refreshMarkdown(literatureItem, pdf, markdown);
-                }
+                updateBatchProgress(
+                    batch, processed, literature.length, "处理中 · Markdown 转换",
+                    attachmentName(source)
+                );
+                await refreshMarkdown(literatureItem, source, null);
                 changed = true;
             }
             return changed;
