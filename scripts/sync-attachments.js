@@ -827,17 +827,48 @@ async function consumeScope(scope, warnings) {
     return { updated: count };
 }
 
-function showSummary(summary) {
-    const win = new Zotero.ProgressWindow();
-    win.changeHeadline(IS_PUBLISHER ? "发布附件" : "同步附件");
-    const line = new win.ItemProgress(null, `文献 ${summary.total}｜更新 ${summary.updated}｜失败 ${summary.failed}`);
-    line.setProgress(100);
+function escapeHtml(value) {
+    return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+let activeBatch = null;
+
+function createBatchProgress() {
+    const progress = new Zotero.ProgressWindow();
+    progress.changeHeadline(IS_PUBLISHER ? "发布附件 · 准备中" : "同步附件 · 准备中");
+    const statusLine = new progress.ItemProgress(null, "正在检查选择范围");
+    const titleLine = new progress.ItemProgress(null, "");
+    statusLine.setProgress(0);
+    progress.show();
+    return { progress, statusLine, titleLine, total: 0, completed: 0, active: 0 };
+}
+
+function updateBatchProgress(batch, detail = "") {
+    const { total, completed, active } = batch;
+    const heading = IS_PUBLISHER ? "发布附件" : "同步附件";
+    batch.progress.changeHeadline(`${heading} ${completed}/${total}`);
+    batch.statusLine.setProgress(total ? Math.floor(completed * 100 / total) : 0);
+    batch.statusLine.setText(`已处理 ${completed}/${total} · ${active} 项处理中`);
+    batch.titleLine.setText(detail);
+}
+
+function showSummary(batch, summary) {
+    const { progress, statusLine, titleLine } = batch;
+    progress.changeHeadline(IS_PUBLISHER ? "发布附件" : "同步附件");
+    statusLine.setProgress(100);
+    statusLine.setText("处理完成");
+    titleLine.setText(
+        `文献 ${summary.total}｜附件更新 ${summary.updated}｜失败 ${summary.failed}｜提醒 ${summary.issues.length}`
+    );
     for (const issue of summary.issues) {
-        win.addDescription(issue);
+        progress.addDescription(escapeHtml(issue));
     }
-    win.show();
     if (!summary.issues.length) {
-        win.startCloseTimer(5000);
+        progress.startCloseTimer(5000);
     }
 }
 
@@ -845,11 +876,15 @@ function showSummary(summary) {
     if (!API_KEY) {
         throw new Error("缺少 CHEN_GROUP_API_KEY 或 CHEN_GROUP_API_KEY_MEMBER");
     }
+    const batch = createBatchProgress();
+    activeBatch = batch;
     const scopes = await resolveScopes();
     if (!scopes.length) {
         throw new Error("没有可同步的文献");
     }
     const summary = { total: scopes.length, updated: 0, failed: 0, issues: [] };
+    batch.total = scopes.length;
+    updateBatchProgress(batch, "准备同步");
     let nextIndex = 0;
     async function worker() {
         while (true) {
@@ -859,6 +894,9 @@ function showSummary(summary) {
             }
             const scope = scopes[index];
             const warnings = [];
+            const title = scope.literature.getField("title") || scope.literature.key;
+            batch.active++;
+            updateBatchProgress(batch, `处理中 · ${title}`);
             try {
                 const result = IS_PUBLISHER
                     ? await publishScope(scope, warnings)
@@ -870,9 +908,13 @@ function showSummary(summary) {
                 warnings.push(error.message || String(error));
                 Zotero.logError(error);
             }
-            const title = scope.literature.getField("title") || scope.literature.key;
-            for (const warning of warnings) {
-                summary.issues.push(`${title}｜${warning}`);
+            finally {
+                for (const warning of warnings) {
+                    summary.issues.push(`${title}｜${warning}`);
+                }
+                batch.active--;
+                batch.completed++;
+                updateBatchProgress(batch, `已处理 · ${title}`);
             }
         }
     }
@@ -881,11 +923,19 @@ function showSummary(summary) {
         worker
     ));
     await document2mdTail;
-    showSummary(summary);
+    showSummary(batch, summary);
+    activeBatch = null;
 })().catch(error => {
     Zotero.logError(error);
-    const win = new Zotero.ProgressWindow();
-    win.changeHeadline("同步附件失败");
-    win.addDescription(error.message || String(error));
-    win.show();
+    const progress = activeBatch ? activeBatch.progress : new Zotero.ProgressWindow();
+    progress.changeHeadline(`${IS_PUBLISHER ? "发布附件" : "同步附件"}失败`);
+    if (activeBatch) {
+        activeBatch.statusLine.setText("执行中断");
+        activeBatch.titleLine.setText(error.message || String(error));
+    }
+    progress.addDescription(escapeHtml(error.message || String(error)));
+    if (!activeBatch) {
+        progress.show();
+    }
+    activeBatch = null;
 });

@@ -97,6 +97,7 @@ PUT https://api.chen-group.cn/v1/attachments?doi=...&kind=manifest
 - `sync-attachments.js` 通过 `dispatchActionByKey()` 调用它。
 - `document2md.js` 为隐藏 Action，不显示独立进度或汇总，转换任务串行执行。
 - “同步附件”学生按文献 8 路并发，document2md 转换串行；教师发布始终串行。
+- “同步附件”启动即创建单个 `Zotero.ProgressWindow`，逐篇更新完成数、百分比、并发量及当前文献；结束复用该窗口展示汇总。出现错误时保留原窗口与详细错误，不另开窗口；有错误或提醒时不自动关闭。
 - `document2md` 保留 `local` / `server` 两种后端。
 - 显式 Action 的进度使用 `Zotero.ProgressWindow`，确认和选择使用 `Services.prompt`。
 - 一次性迁移或修复脚本完成并核验后不长期保留。
