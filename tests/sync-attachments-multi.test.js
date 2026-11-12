@@ -99,6 +99,28 @@ test("教师发布正文和 SI，清单只提交一次，不生成身份 Tag", a
     assert.equal(events.windows.length, 1);
 });
 
+test("上传错误显示服务端原因，上传成功核对来源哈希", async () => {
+    const { ctx } = fixture(true);
+    inject(ctx, [
+        "IOUtils.read = async () => new Uint8Array([1]);",
+        "httpRequest = async () => ({status:409,response:{error:'ZIP 超出资源限制'}});",
+    ]);
+    await assert.rejects(
+        vm.runInContext("uploadFile({parameter:'doi',value:'10.1000/test'},'bundle','bundle.zip','application/zip', 'A7YB92CX')", ctx),
+        /HTTP 409 · ZIP 超出资源限制/
+    );
+    inject(ctx, [
+        "httpRequest = async () => ({status:201,response:{sha256:'b'.repeat(64)}});",
+    ]);
+    await assert.rejects(
+        vm.runInContext(
+            "uploadFile({parameter:'doi',value:'10.1000/test'},'source','paper.pdf','application/pdf','A7YB92CX','paper.pdf','a'.repeat(64))",
+            ctx
+        ),
+        /源附件上传哈希不匹配/
+    );
+});
+
 test("学生从纯元数据下载全部附件和 MD，重复同步不新增文件", async () => {
     const { ctx, events } = fixture(false);
     ctx.files = [makeSource(A, "paper.pdf", SHA_A), makeSource(B, "SI.pdf", SHA_B)];

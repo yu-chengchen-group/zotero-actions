@@ -352,6 +352,14 @@ async function httpRequest(method, url, options) {
     }
 }
 
+function attachmentErrorDetail(response) {
+    const payload = response.response;
+    const detail = typeof payload === "string"
+        ? payload : payload && (payload.error || payload.detail);
+    return typeof detail === "string" && detail.trim()
+        ? ` · ${detail.slice(0, 200)}` : "";
+}
+
 
 async function getRemoteState(identity, cacheOnly = false) {
     const cacheOnlyQuery = cacheOnly ? "&cache_only=1" : "";
@@ -733,7 +741,9 @@ async function createBundle(markdown, attachmentID, sourceHash) {
 }
 
 
-async function uploadFile(identity, kind, path, contentType, attachmentID = "", filename = "") {
+async function uploadFile(
+    identity, kind, path, contentType, attachmentID = "", filename = "", expectedSha256 = ""
+) {
     const body = await IOUtils.read(path);
     const response = await httpRequest(
         "PUT",
@@ -751,7 +761,10 @@ async function uploadFile(identity, kind, path, contentType, attachmentID = "", 
         }
     );
     if (response.status < 200 || response.status >= 300) {
-        throw new Error(`${kind} 上传失败：HTTP ${response.status}`);
+        throw new Error(`${kind} 上传失败：HTTP ${response.status}${attachmentErrorDetail(response)}`);
+    }
+    if (expectedSha256 && response.response?.sha256 !== expectedSha256) {
+        throw new Error(`源附件上传哈希不匹配：${filename || attachmentID}`);
     }
     return response.response;
 }
@@ -769,7 +782,7 @@ async function publishManifest(identity, records) {
         }
     );
     if (response.status < 200 || response.status >= 300) {
-        throw new Error(`附件清单提交失败：HTTP ${response.status}`);
+        throw new Error(`附件清单提交失败：HTTP ${response.status}${attachmentErrorDetail(response)}`);
     }
 }
 
@@ -1033,7 +1046,7 @@ let activeBatch = null;
                 await uploadFile(
                     identity, "source", path,
                     source.attachmentContentType || "application/octet-stream",
-                    source.key, filename
+                    source.key, filename, digest
                 );
                 changed = true;
             }
