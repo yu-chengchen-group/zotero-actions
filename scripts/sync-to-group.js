@@ -140,7 +140,7 @@ function sourceItemLink(item) {
 
 function createProgress() {
     const progress = new Zotero.ProgressWindow();
-    progress.changeHeadline("同步到课题组 0");
+    progress.changeHeadline("同步到课题组");
     const statusLine = new progress.ItemProgress(null, "处理中");
     const titleLine = new progress.ItemProgress(null, "");
     progress.show();
@@ -160,8 +160,7 @@ function updateProgress(context, type, source, label) {
         : context.batch.collectionIDs;
     ids.add(source.id);
     const completed = context.batch.itemIDs.size + context.batch.collectionIDs.size;
-    context.batch.progress.changeHeadline(`同步到课题组 ${completed}`);
-    context.batch.statusLine.setText("处理中");
+    context.batch.statusLine.setText(`同步 ${completed} 项`);
     context.batch.titleLine.setText(label);
 }
 

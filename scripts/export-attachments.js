@@ -258,7 +258,7 @@ function showSummary(batchProgress, summary) {
 
 function createBatchProgress(total) {
     const progress = new Zotero.ProgressWindow();
-    progress.changeHeadline(`导出附件 0/${total}`);
+    progress.changeHeadline("导出附件");
     const statusLine = new progress.ItemProgress(null, "处理中");
     const detailLine = new progress.ItemProgress(null, "");
     statusLine.setProgress(0);
@@ -268,9 +268,8 @@ function createBatchProgress(total) {
 
 function updateBatchProgress(batchProgress, completed, total, text) {
     const percent = total ? completed * 100 / total : 100;
-    batchProgress.progress.changeHeadline(`导出附件 ${completed}/${total}`);
     batchProgress.statusLine.setProgress(percent);
-    batchProgress.statusLine.setText("处理中");
+    batchProgress.statusLine.setText(`导出 ${completed}/${total}`);
     batchProgress.detailLine.setText(text);
 }
 

@@ -68,7 +68,7 @@ function confirmClearCollections(total, membershipCount) {
 
 function createProgress(total) {
     const progress = new Zotero.ProgressWindow();
-    progress.changeHeadline(`清空分类 0/${total}`);
+    progress.changeHeadline("清空分类");
     const statusLine = new progress.ItemProgress(null, "处理中");
     const detailLine = new progress.ItemProgress(null, "");
     statusLine.setProgress(0);
@@ -78,11 +78,8 @@ function createProgress(total) {
 
 function updateProgress(batch, completed, total, removedMemberships) {
     const percent = total ? completed * 100 / total : 100;
-    batch.progress.changeHeadline(
-        `清空分类 ${completed}/${total}`
-    );
     batch.statusLine.setProgress(percent);
-    batch.statusLine.setText("处理中");
+    batch.statusLine.setText(`清空 ${completed}/${total}`);
     batch.detailLine.setText(`分类 ${removedMemberships}`);
 }
 

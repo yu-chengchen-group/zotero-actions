@@ -815,11 +815,11 @@ function showFinalSummary(batch, summary) {
     batch.titleLine.setProgress(100);
     batch.titleLine.setText(
         IS_PUBLISHER
-            ? `总计 ${summary.total}｜已一致 ${summary.unchanged}｜发布 ${summary.updated}｜失败 ${summary.failed.length}`
+            ? `发布 ${summary.updated}｜未变 ${summary.unchanged}｜失败 ${summary.failed.length}`
             : (
                 issueCount
-                    ? `总计 ${summary.total}｜已一致 ${summary.unchanged}｜更新 ${summary.updated}｜待审 ${issueCount}`
-                    : `总计 ${summary.total}｜已一致 ${summary.unchanged}｜更新 ${summary.updated}`
+                    ? `更新 ${summary.updated}｜未变 ${summary.unchanged}｜待处理 ${issueCount}`
+                    : `更新 ${summary.updated}｜未变 ${summary.unchanged}｜待处理 0`
             )
     );
 
@@ -856,7 +856,7 @@ function showFinalSummary(batch, summary) {
 function createBatchProgress(total) {
     const progress = new Zotero.ProgressWindow();
     progress.changeHeadline(IS_PUBLISHER ? "发布附件" : "同步附件");
-    const statusLine = new progress.ItemProgress(null, "处理中");
+    const statusLine = new progress.ItemProgress(null, "准备中");
     const titleLine = new progress.ItemProgress(null, "");
     statusLine.setProgress(0);
     progress.show();
@@ -864,18 +864,22 @@ function createBatchProgress(total) {
 }
 
 
-function updateBatchProgress(batch, processed, total, status = "处理中", detail = "") {
+function updateBatchProgress(batch, processed, total, status = "", detail = "") {
     const percent = total ? 50 + processed * 50 / total : 100;
     batch.statusLine.setProgress(percent);
-    batch.statusLine.setText(`已处理 ${processed}/${total} · ${status}`);
-    batch.titleLine.setText(detail);
+    batch.statusLine.setText(
+        status === "转换"
+            ? `转换：${detail}`
+            : `${IS_PUBLISHER ? "发布" : "同步"} ${processed}/${total}${status ? ` · ${status}` : ""}`
+    );
+    batch.titleLine.setText("");
 }
 
 
 function updateCheckProgress(batch, checked, total, activeChecks) {
     batch.statusLine.setProgress(total ? checked * 50 / total : 50);
     batch.statusLine.setText(
-        `已检查 ${checked}/${total} · 并发检查服务器 · ${activeChecks} 项处理中`
+        `检查 ${checked}/${total} · ${activeChecks} 项处理中`
     );
 }
 
@@ -1040,7 +1044,7 @@ let activeBatch = null;
                 if (!valid || (!sourceMatches && !isPdfAttachment(source)
                     && !/\.docx$/i.test(filename))) {
                     updateBatchProgress(
-                        batch, processed, literature.length, "处理中 · Markdown 转换", filename
+                        batch, processed, literature.length, "转换", filename
                     );
                     try {
                         markdown = await refreshMarkdown(literatureItem, source, markdown);
@@ -1123,7 +1127,7 @@ let activeBatch = null;
                 }
                 else if (canConvert(source)) {
                     updateBatchProgress(
-                        batch, processed, literature.length, "处理中 · Markdown 转换", record.filename
+                        batch, processed, literature.length, "转换", record.filename
                     );
                     await refreshMarkdown(literatureItem, source, null);
                     changed = true;
@@ -1262,7 +1266,7 @@ let activeBatch = null;
                     continue;
                 }
                 updateBatchProgress(
-                    batch, processed, literature.length, "处理中 · Markdown 转换",
+                    batch, processed, literature.length, "转换",
                     attachmentName(source)
                 );
                 await refreshMarkdown(literatureItem, source, null);
@@ -1283,7 +1287,7 @@ let activeBatch = null;
                     batch,
                     processed,
                     literature.length,
-                    `并发同步更新 · ${activeSync} 项处理中`
+                    `${activeSync} 项处理中`
                 );
                 try {
                     addResult(await processStudentState(state));
@@ -1298,7 +1302,7 @@ let activeBatch = null;
                         batch,
                         processed,
                         literature.length,
-                        `并发同步更新 · ${activeSync} 项处理中`
+                        `${activeSync} 项处理中`
                     );
                 }
             }

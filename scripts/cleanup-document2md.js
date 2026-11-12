@@ -118,7 +118,7 @@ function confirmCleanup(total) {
 
 function createBatchProgress(total) {
     const progress = new Zotero.ProgressWindow();
-    progress.changeHeadline(`清空产物 0/${total}`);
+    progress.changeHeadline("清空产物");
     const statusLine = new progress.ItemProgress(null, "处理中");
     const detailLine = new progress.ItemProgress(null, "");
     statusLine.setProgress(0);
@@ -128,9 +128,8 @@ function createBatchProgress(total) {
 
 function updateBatchProgress(batchProgress, completed, total, text) {
     const percent = total ? completed * 100 / total : 100;
-    batchProgress.progress.changeHeadline(`清空产物 ${completed}/${total}`);
     batchProgress.statusLine.setProgress(percent);
-    batchProgress.statusLine.setText("处理中");
+    batchProgress.statusLine.setText(`清空 ${completed}/${total}`);
     batchProgress.detailLine.setText(text);
 }
 

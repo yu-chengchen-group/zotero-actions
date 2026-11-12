@@ -180,6 +180,29 @@ test("学生无 DOI 且没有共享 Cache-Key 时拒绝自行生成", async () =
     );
 });
 
+test("进度标题固定、圆形进度保留、状态文字不重复", () => {
+    for (const teacher of [true, false]) {
+        const { ctx, events } = fixture(teacher);
+        const batch = vm.runInContext("createBatchProgress(10)", ctx);
+        ctx.batch = batch;
+        assert.equal(events.windows[0].headline, teacher ? "发布附件" : "同步附件");
+
+        vm.runInContext("updateCheckProgress(batch, 3, 10, 8)", ctx);
+        assert.equal(batch.statusLine.progress, 15);
+        assert.equal(batch.statusLine.text, "检查 3/10 · 8 项处理中");
+
+        vm.runInContext("updateBatchProgress(batch, 4, 10)", ctx);
+        assert.equal(batch.statusLine.progress, 70);
+        assert.equal(batch.statusLine.text, teacher ? "发布 4/10" : "同步 4/10");
+
+        vm.runInContext('updateBatchProgress(batch, 4, 10, "转换", "paper.pdf")', ctx);
+        assert.equal(batch.statusLine.progress, 70);
+        assert.equal(batch.statusLine.text, "转换：paper.pdf");
+        assert.equal(batch.titleLine.text, "");
+        assert.equal(events.windows[0].headline, teacher ? "发布附件" : "同步附件");
+    }
+});
+
 test("同步到群组前仅对无 DOI 文献生成一次共享 Cache-Key", async () => {
     const source = fs.readFileSync(
         path.join(__dirname, "../scripts/sync-to-group.js"), "utf8"

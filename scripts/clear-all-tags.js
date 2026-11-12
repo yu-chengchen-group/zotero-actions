@@ -68,7 +68,7 @@ function confirmClearTags(total, tagCount) {
 
 function createProgress(total) {
     const progress = new Zotero.ProgressWindow();
-    progress.changeHeadline(`清空标签 0/${total}`);
+    progress.changeHeadline("清空标签");
     const statusLine = new progress.ItemProgress(null, "处理中");
     const detailLine = new progress.ItemProgress(null, "");
     statusLine.setProgress(0);
@@ -78,11 +78,8 @@ function createProgress(total) {
 
 function updateProgress(batch, completed, total, removedTags) {
     const percent = total ? completed * 100 / total : 100;
-    batch.progress.changeHeadline(
-        `清空标签 ${completed}/${total}`
-    );
     batch.statusLine.setProgress(percent);
-    batch.statusLine.setText("处理中");
+    batch.statusLine.setText(`清空 ${completed}/${total}`);
     batch.detailLine.setText(`标签 ${removedTags}`);
 }
 
