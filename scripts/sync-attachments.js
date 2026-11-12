@@ -855,7 +855,7 @@ function showFinalSummary(batch, summary) {
 
 function createBatchProgress(total) {
     const progress = new Zotero.ProgressWindow();
-    progress.changeHeadline(`${IS_PUBLISHER ? "发布附件" : "同步附件"} 0/${total}`);
+    progress.changeHeadline(IS_PUBLISHER ? "发布附件" : "同步附件");
     const statusLine = new progress.ItemProgress(null, "处理中");
     const titleLine = new progress.ItemProgress(null, "");
     statusLine.setProgress(0);
@@ -866,9 +866,6 @@ function createBatchProgress(total) {
 
 function updateBatchProgress(batch, processed, total, status = "处理中", detail = "") {
     const percent = total ? 50 + processed * 50 / total : 100;
-    batch.progress.changeHeadline(
-        `${IS_PUBLISHER ? "发布附件" : "同步附件"} ${processed}/${total}`
-    );
     batch.statusLine.setProgress(percent);
     batch.statusLine.setText(`已处理 ${processed}/${total} · ${status}`);
     batch.titleLine.setText(detail);
@@ -876,9 +873,6 @@ function updateBatchProgress(batch, processed, total, status = "处理中", deta
 
 
 function updateCheckProgress(batch, checked, total, activeChecks) {
-    batch.progress.changeHeadline(
-        `${IS_PUBLISHER ? "发布附件" : "同步附件"} 0/${total}`
-    );
     batch.statusLine.setProgress(total ? checked * 50 / total : 50);
     batch.statusLine.setText(
         `已检查 ${checked}/${total} · 并发检查服务器 · ${activeChecks} 项处理中`
